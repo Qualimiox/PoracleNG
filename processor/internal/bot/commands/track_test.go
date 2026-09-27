@@ -860,3 +860,98 @@ func TestTrack_AreaOverrideAcceptsCommasAndRepeats(t *testing.T) {
 		})
 	}
 }
+
+// --- the "everything" guard and class filters --------------------------------
+//
+// The guard counts len(parsed.Ranges) > 0 as a meaningful filter. size and
+// rarity are class filters whose MODAL class holds the bulk of spawns — M for
+// size, Common for rarity — and both resolve to an exact match (min == max) when
+// no max is given. So `everything size:m` satisfied the guard while narrowing
+// almost nothing, which is precisely what the guard exists to stop.
+//
+// This became reachable in two clicks from the slash UI in #238: the size token
+// used to be unrecognised and abort the command, so the guard was never reached.
+
+func TestTrack_EverythingRejectsModalSizeClass(t *testing.T) {
+	ctx := trackCtx(t)
+	ctx.IsAdmin = false
+
+	replies := runTrack(t, ctx, "everything size:m")
+	require.NotEmpty(t, replies)
+	if replies[0].React != "🙅" {
+		t.Errorf("expected 🙅 — size:m admits the modal class and narrows almost nothing; got %q (text=%q)",
+			replies[0].React, replies[0].Text)
+	}
+}
+
+func TestTrack_EverythingRejectsModalRarityClass(t *testing.T) {
+	ctx := trackCtx(t)
+	ctx.IsAdmin = false
+
+	replies := runTrack(t, ctx, "everything rarity:common")
+	require.NotEmpty(t, replies)
+	if replies[0].React != "🙅" {
+		t.Errorf("expected 🙅 for rarity:common, got %q (text=%q)", replies[0].React, replies[0].Text)
+	}
+}
+
+// A class filter that EXCLUDES the modal class genuinely narrows, and must
+// still satisfy the guard — "any species, but only XXL" is a reasonable
+// subscription and a narrow one.
+func TestTrack_EverythingAllowsNarrowSizeClass(t *testing.T) {
+	ctx := trackCtx(t)
+	ctx.IsAdmin = false
+
+	replies := runTrack(t, ctx, "everything size:xxl")
+	require.NotEmpty(t, replies)
+	if replies[0].React == "🙅" {
+		t.Errorf("size:xxl excludes the modal class and must satisfy the guard; got 🙅 (text=%q)", replies[0].Text)
+	}
+}
+
+func TestTrack_EverythingAllowsNarrowRarityClass(t *testing.T) {
+	ctx := trackCtx(t)
+	ctx.IsAdmin = false
+
+	replies := runTrack(t, ctx, "everything rarity:rare")
+	require.NotEmpty(t, replies)
+	if replies[0].React == "🙅" {
+		t.Errorf("rarity:rare must satisfy the guard; got 🙅 (text=%q)", replies[0].Text)
+	}
+}
+
+// A range spanning the modal class does not narrow either, even with a max.
+func TestTrack_EverythingRejectsSizeRangeSpanningModal(t *testing.T) {
+	ctx := trackCtx(t)
+	ctx.IsAdmin = false
+
+	replies := runTrack(t, ctx, "everything size:xs-xl")
+	require.NotEmpty(t, replies)
+	if replies[0].React != "🙅" {
+		t.Errorf("size:xs-xl still admits M; expected 🙅, got %q (text=%q)", replies[0].React, replies[0].Text)
+	}
+}
+
+// Filters the guard has always accepted must keep working.
+func TestTrack_EverythingStillAllowsIV(t *testing.T) {
+	ctx := trackCtx(t)
+	ctx.IsAdmin = false
+
+	replies := runTrack(t, ctx, "everything iv90")
+	require.NotEmpty(t, replies)
+	if replies[0].React == "🙅" {
+		t.Errorf("iv90 must satisfy the guard; got 🙅 (text=%q)", replies[0].Text)
+	}
+}
+
+// Admins bypass the guard entirely — unchanged.
+func TestTrack_EverythingAdminBypassesGuard(t *testing.T) {
+	ctx := trackCtx(t)
+	ctx.IsAdmin = true
+
+	replies := runTrack(t, ctx, "everything size:m")
+	require.NotEmpty(t, replies)
+	if replies[0].React == "🙅" {
+		t.Errorf("admin must bypass the guard; got 🙅 (text=%q)", replies[0].Text)
+	}
+}
