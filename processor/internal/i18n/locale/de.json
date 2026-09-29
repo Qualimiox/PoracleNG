@@ -1037,6 +1037,7 @@
   "error.slash.unregistered_with_channel": "🛑 Bitte zuerst registrieren. Schreib eine DM mit !poracle, oder poste !poracle in {0}.",
   "error.slash.unregistered_dm_only": "🛑 Bitte zuerst registrieren. Schreib eine DM mit !poracle.",
   "error.slash.track.no_pokemon": "Bitte gib ein Pokémon an, das beobachtet werden soll.",
+  "error.slash.track.bad_iv": "{0} is not a valid IV filter — use a number like 95, or a range like 90-100.",
   "error.slash.raid.need_boss_or_level": "Bitte geben entweder einen Boss oder ein Level an.",
   "error.slash.raid.boss_and_level": "Bitte geben entweder einen Boss oder ein Level an, nicht beides.",
   "error.slash.egg.no_level": "Bitte gebe ein Ei-Level an.",
