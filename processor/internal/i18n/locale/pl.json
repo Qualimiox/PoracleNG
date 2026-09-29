@@ -1037,6 +1037,7 @@
   "error.slash.unregistered_with_channel": "🛑 You need to register first. DM me with !poracle, or run !poracle in {0}.",
   "error.slash.unregistered_dm_only": "🛑 You need to register first. DM me with !poracle.",
   "error.slash.track.no_pokemon": "Please specify a Pokemon to track.",
+  "error.slash.track.bad_iv": "{0} is not a valid IV filter — use a number like 95, or a range like 90-100.",
   "error.slash.raid.need_boss_or_level": "Please specify either a boss or a level.",
   "error.slash.raid.boss_and_level": "Please specify either a boss OR a level, not both.",
   "error.slash.egg.no_level": "Please specify an egg level.",
