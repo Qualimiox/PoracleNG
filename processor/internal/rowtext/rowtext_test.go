@@ -522,6 +522,163 @@ func TestRaidRowText_WithGymID(t *testing.T) {
 	}
 }
 
+func TestRowText_MonsterShowsOverrides(t *testing.T) {
+	g := testGenerator(t)
+	tr := g.Translations.For("en")
+
+	// Override location label only.
+	rule := &db.MonsterTracking{
+		PokemonID: 25,
+		MinIV:     -1, MaxIV: 100,
+		MinCP: 0, MaxCP: 9000,
+		MinLevel: 0, MaxLevel: 55,
+		MaxATK: 15, MaxDEF: 15, MaxSTA: 15,
+		MaxSize: 5, MaxRarity: 6,
+		Distance:              500,
+		OverrideLocationLabel: "Home",
+	}
+	got := g.MonsterRowText(tr, rule)
+	if !strings.Contains(got, "@ Home") {
+		t.Fatalf("expected '@ Home' in rowtext, got: %s", got)
+	}
+
+	// Override areas only (no distance, no label).
+	rule.OverrideLocationLabel = ""
+	rule.Distance = 0
+	rule.OverrideAreas = []string{"berlin", "munich"}
+	got = g.MonsterRowText(tr, rule)
+	if !strings.Contains(got, "in berlin, munich") {
+		t.Fatalf("expected 'in berlin, munich' in rowtext, got: %s", got)
+	}
+}
+
+// TestRowText_AllTypesShowOverrides verifies that appendOverride is wired
+// correctly in every per-type RowText function. A single minimal rule per type
+// with OverrideLocationLabel = "Home" is passed; the output must contain "@ Home".
+func TestRowText_AllTypesShowOverrides(t *testing.T) {
+	g := testGenerator(t)
+	tr := g.Translations.For("en")
+
+	cases := []struct {
+		name string
+		fn   func() string
+	}{
+		{"monster", func() string {
+			return g.MonsterRowText(tr, &db.MonsterTracking{
+				PokemonID: 25, Distance: 500,
+				MinIV: -1, MaxIV: 100, MinCP: 0, MaxCP: 9000,
+				MinLevel: 0, MaxLevel: 55,
+				MaxATK: 15, MaxDEF: 15, MaxSTA: 15,
+				MaxSize: 5, MaxRarity: 6,
+				OverrideLocationLabel: "Home",
+			})
+		}},
+		{"raid", func() string {
+			return g.RaidRowText(tr, &db.RaidTracking{
+				PokemonID: 9000, Level: 5, Team: 4, Template: "1",
+				OverrideLocationLabel: "Home",
+			})
+		}},
+		{"egg", func() string {
+			return g.EggRowText(tr, &db.EggTracking{
+				Level: 5, Team: 4, Template: "1",
+				OverrideLocationLabel: "Home",
+			})
+		}},
+		{"quest", func() string {
+			return g.QuestRowText(tr, &db.QuestTracking{
+				RewardType: 3, Reward: 1000, Template: "1",
+				OverrideLocationLabel: "Home",
+			})
+		}},
+		{"invasion", func() string {
+			return g.InvasionRowText(tr, &db.InvasionTracking{
+				GruntType: "Water", Template: "1",
+				OverrideLocationLabel: "Home",
+			})
+		}},
+		{"lure", func() string {
+			return g.LureRowText(tr, &db.LureTracking{
+				LureID: 501, Template: "1",
+				OverrideLocationLabel: "Home",
+			})
+		}},
+		{"gym", func() string {
+			return g.GymRowText(tr, &db.GymTracking{
+				Team: 2, Template: "1",
+				OverrideLocationLabel: "Home",
+			})
+		}},
+		{"nest", func() string {
+			return g.NestRowText(tr, &db.NestTracking{
+				PokemonID: 25, Template: "1",
+				OverrideLocationLabel: "Home",
+			})
+		}},
+		{"fort", func() string {
+			return g.FortUpdateRowText(tr, &db.FortTracking{
+				FortType: "pokestop", Template: "1",
+				ChangeTypes:           `["name"]`,
+				OverrideLocationLabel: "Home",
+			})
+		}},
+		{"maxbattle", func() string {
+			return g.MaxbattleRowText(tr, &db.MaxbattleTracking{
+				PokemonID: 9000, Level: 3, Template: "1",
+				OverrideLocationLabel: "Home",
+			})
+		}},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := c.fn()
+			if !strings.Contains(got, "@ Home") {
+				t.Errorf("%s rowtext missing '@ Home': %s", c.name, got)
+			}
+		})
+	}
+}
+
+func TestMonsterRowText_MegaMode(t *testing.T) {
+	g := testGenerator(t)
+	tr := g.Translations.For("en")
+	m := &db.MonsterTracking{
+		PokemonID: 6, PVPRankingLeague: 1500, PVPRankingBest: 1, PVPRankingWorst: 5,
+		PVPRankingEvolution: 2,
+	}
+	got := g.MonsterRowText(tr, m)
+	if !strings.Contains(got, "mega x") {
+		t.Fatalf("expected rowtext to mention 'mega x', got: %q", got)
+	}
+}
+
+func TestRaidRowText_Costume(t *testing.T) {
+	tr := i18n.NewTranslator("en", map[string]string{
+		"poke_25":        "Pikachu",
+		"costume_1":      "Holiday 2016",
+		"msg.no_costume": "no costume",
+	})
+	gd := &gamedata.GameData{
+		Monsters: map[gamedata.MonsterKey]*gamedata.Monster{{ID: 25, Form: 0}: {PokemonID: 25}},
+		Costumes: map[int]gamedata.CostumeInfo{1: {ID: 1, Name: "Holiday 2016"}},
+	}
+	g := &Generator{GD: gd, DefaultTemplateName: "1"}
+
+	// costume N -> shows the name
+	if got := g.RaidRowText(tr, &db.RaidTracking{PokemonID: 25, Level: 5, Costume: 1, Move: 9000, Evolution: 9000, Template: "1"}); !strings.Contains(got, "Holiday 2016") {
+		t.Errorf("costume 1 row should contain the costume name, got: %q", got)
+	}
+	// costume 0 -> "no costume"
+	if got := g.RaidRowText(tr, &db.RaidTracking{PokemonID: 25, Level: 5, Costume: 0, Move: 9000, Evolution: 9000, Template: "1"}); !strings.Contains(got, "no costume") {
+		t.Errorf("costume 0 row should contain 'no costume', got: %q", got)
+	}
+	// costume 9000 (any) -> nothing costume-related
+	if got := g.RaidRowText(tr, &db.RaidTracking{PokemonID: 25, Level: 5, Costume: 9000, Move: 9000, Evolution: 9000, Template: "1"}); strings.Contains(got, "Holiday 2016") || strings.Contains(got, "no costume") {
+		t.Errorf("costume 9000 row should not mention costume, got: %q", got)
+	}
+}
+
 func TestUcFirst(t *testing.T) {
 	tests := []struct {
 		input, want string
@@ -537,4 +694,123 @@ func TestUcFirst(t *testing.T) {
 			t.Errorf("ucFirst(%q) = %q, want %q", tt.input, got, tt.want)
 		}
 	}
+}
+
+// TestTranslateMonsterName_FormSuppression covers the Rattata scenario: an
+// explicitly-tracked "Normal" form (form 45, non-zero) must show its name in
+// !tracked so it's distinguishable from the "any form" (form 0) tracking and
+// from other named forms (Alola, form 46). Only form 0 suppresses a
+// Normal/Unset label.
+func TestTranslateMonsterName_FormSuppression(t *testing.T) {
+	gd := &gamedata.GameData{
+		Monsters: map[gamedata.MonsterKey]*gamedata.Monster{
+			{ID: 19, Form: 0}:  {PokemonID: 19, FormID: 0},
+			{ID: 19, Form: 45}: {PokemonID: 19, FormID: 45},
+			{ID: 19, Form: 46}: {PokemonID: 19, FormID: 46},
+		},
+	}
+	// form_45 → "Normal" and form_46 → "Alola" come from gamelocale in
+	// production; inject them directly since i18n.Load("") skips gamelocale.
+	tr := i18n.NewTranslator("en", map[string]string{
+		"poke_19": "Rattata",
+		"form_45": "Normal",
+		"form_46": "Alola",
+	})
+
+	tests := []struct {
+		name     string
+		form     int
+		wantForm string
+	}{
+		{"explicit normal form shows Normal", 45, "Normal"},
+		{"named form shows its name", 46, "Alola"},
+		{"any form (0) stays blank", 0, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotName, gotForm := translateMonsterName(tr, gd, 19, tt.form)
+			if gotName != "Rattata" {
+				t.Errorf("name = %q, want %q", gotName, "Rattata")
+			}
+			if gotForm != tt.wantForm {
+				t.Errorf("form %d: formName = %q, want %q", tt.form, gotForm, tt.wantForm)
+			}
+		})
+	}
+}
+
+// !tracked rendered invasion rules by looking the STORED grunt_type up as a
+// translation key. Stored values are lowercase ("grass"), while the
+// pogo-translations locale files are English-as-key and title-cased ("Grass"),
+// so every lookup missed and every non-English user saw the English type name
+// in their own tracking list.
+// gruntLocaleGenerator seeds the German translator the way production does:
+// pogo-translations locale files are English-as-key and title-cased, so the
+// key for the grass type is "Grass", not the stored "grass".
+func gruntLocaleGenerator(t *testing.T) *Generator {
+	t.Helper()
+	g := testGenerator(t)
+	g.Translations.AddTranslator(i18n.NewTranslator("de", map[string]string{
+		"Grass":                   "Pflanze",
+		"tracking.everything":     "_alle_",
+		"tracking.grunt_type_fmt": "Rüpel Typ **{0}**",
+		"tracking.gender_fmt":     "Geschlecht: {0}",
+		"tracking.any":            "_alle_",
+	}))
+	return g
+}
+
+func TestInvasionRowTextTranslatesTypeName(t *testing.T) {
+	g := gruntLocaleGenerator(t)
+	tr := g.Translations.For("de")
+
+	got := g.InvasionRowText(tr, &db.InvasionTracking{GruntType: "grass", Template: "1"})
+	if !strings.Contains(got, "Pflanze") {
+		t.Errorf("German invasion row = %q, want the translated type name %q", got, "Pflanze")
+	}
+	if strings.Contains(got, "Grass") {
+		t.Errorf("German invasion row still shows the English type name: %q", got)
+	}
+}
+
+// The catch-alls are not type names and have their own translated label.
+func TestInvasionRowTextTranslatesEverything(t *testing.T) {
+	g := gruntLocaleGenerator(t)
+	trDE := g.Translations.For("de")
+
+	got := g.InvasionRowText(trDE, &db.InvasionTracking{GruntType: "everything", Template: "1"})
+	// Assert on the TYPE slot specifically: the everything label ("_alle_")
+	// also happens to be the gender wildcard, so a whole-row Contains would
+	// pass without the type ever being translated.
+	want := trDE.T("tracking.everything")
+	if slot := boldSlot(got); slot != want {
+		t.Errorf("type slot = %q, want %q (full row: %q)", slot, want, got)
+	}
+}
+
+// A name with no translation anywhere (event names, npc_*) must still render
+// readably rather than leaking a bare key.
+func TestInvasionRowTextFallsBackForUntranslatedNames(t *testing.T) {
+	g := gruntLocaleGenerator(t)
+	tr := g.Translations.For("de")
+
+	got := g.InvasionRowText(tr, &db.InvasionTracking{GruntType: "kecleon", Template: "1"})
+	if !strings.Contains(got, "Kecleon") {
+		t.Errorf("row = %q, want the capitalised fallback %q", got, "Kecleon")
+	}
+}
+
+// boldSlot returns the text between the first pair of ** markers, which is the
+// type slot in tracking.grunt_type_fmt.
+func boldSlot(row string) string {
+	i := strings.Index(row, "**")
+	if i < 0 {
+		return ""
+	}
+	rest := row[i+2:]
+	j := strings.Index(rest, "**")
+	if j < 0 {
+		return ""
+	}
+	return rest[:j]
 }

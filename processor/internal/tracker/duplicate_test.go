@@ -1,6 +1,8 @@
 package tracker
 
 import (
+	"runtime"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -36,6 +38,31 @@ func TestDuplicateCachePokemon(t *testing.T) {
 	}
 }
 
+func TestDuplicateCacheShowcase(t *testing.T) {
+	dc := NewDuplicateCache()
+	defer dc.Close()
+
+	expiry := time.Now().Unix() + 3600
+
+	// First fire (empty leaderboard) — not a duplicate.
+	if dc.CheckShowcase("stop1", expiry, "0:none") {
+		t.Error("first showcase fire should not be a duplicate")
+	}
+	// Same rank-1 state — duplicate.
+	if !dc.CheckShowcase("stop1", expiry, "0:none") {
+		t.Error("identical showcase state should be a duplicate")
+	}
+	// Rank-1 changed (new fingerprint) — NOT a duplicate, so the edit path
+	// sees the leaderboard update.
+	if dc.CheckShowcase("stop1", expiry, "3:679@1032.5") {
+		t.Error("changed rank-1 fingerprint should not be a duplicate")
+	}
+	// Different contest (new expiry) at the same stop — not a duplicate.
+	if dc.CheckShowcase("stop1", expiry+7200, "0:none") {
+		t.Error("new contest (different expiry) should not be a duplicate")
+	}
+}
+
 func TestDuplicateCacheRaid(t *testing.T) {
 	dc := NewDuplicateCache()
 	defer dc.Close()
@@ -60,10 +87,13 @@ func TestDuplicateCacheRaid(t *testing.T) {
 		t.Error("Expected first notification to be false")
 	}
 
-	// Different pokemon - not duplicate
+	// Different pokemon - not duplicate, first sighting (new cache key)
 	isDup, isFirst = dc.CheckRaid("gym1", end, 151, nil)
 	if isDup {
 		t.Error("Expected different pokemon to not be duplicate")
+	}
+	if !isFirst {
+		t.Error("Expected different pokemon to be first notification (new key)")
 	}
 }
 
@@ -82,10 +112,13 @@ func TestRaidRSVPChangeDetection(t *testing.T) {
 		t.Error("Expected first raid to not be duplicate and be first notification")
 	}
 
-	// Same RSVPs — duplicate
+	// Same RSVPs — duplicate, not first
 	isDup, isFirst = dc.CheckRaid("gym2", end, 100, rsvps1)
 	if !isDup {
 		t.Error("Expected same RSVPs to be duplicate")
+	}
+	if isFirst {
+		t.Error("Expected duplicate to not be first notification")
 	}
 
 	// Changed going_count — not duplicate, not first
@@ -98,14 +131,17 @@ func TestRaidRSVPChangeDetection(t *testing.T) {
 		t.Error("Expected changed RSVP to not be first notification")
 	}
 
-	// Changed maybe_count — not duplicate
+	// Changed maybe_count — not duplicate, not first (re-notification with changes)
 	rsvps3 := []RaidRSVP{{Timeslot: ts, GoingCount: 5, MaybeCount: 3}}
 	isDup, isFirst = dc.CheckRaid("gym2", end, 100, rsvps3)
 	if isDup {
 		t.Error("Expected changed maybe_count to not be duplicate")
 	}
+	if isFirst {
+		t.Error("Expected changed maybe_count to not be first notification")
+	}
 
-	// New timeslot added — not duplicate
+	// New timeslot added — not duplicate, not first (re-notification with changes)
 	rsvps4 := []RaidRSVP{
 		{Timeslot: ts, GoingCount: 5, MaybeCount: 3},
 		{Timeslot: ts + 3600000, GoingCount: 1, MaybeCount: 0},
@@ -113,6 +149,9 @@ func TestRaidRSVPChangeDetection(t *testing.T) {
 	isDup, isFirst = dc.CheckRaid("gym2", end, 100, rsvps4)
 	if isDup {
 		t.Error("Expected new timeslot to not be duplicate")
+	}
+	if isFirst {
+		t.Error("Expected new timeslot to not be first notification")
 	}
 
 	// Same as last — duplicate again
@@ -176,4 +215,54 @@ func TestRsvpChanged(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestDuplicateCacheMemoryPerEntry pins the per-entry cost of the dedup set.
+//
+// The ttlcache this replaced spent ~233 B to remember a single bool: an Item
+// struct, a retained key string, a container/list node and an expiry-heap
+// entry. At scanner throughput the live set runs to millions of keys, which
+// measured 1.42 GB in a production heap profile.
+func TestDuplicateCacheMemoryPerEntry(t *testing.T) {
+	dc := NewDuplicateCache()
+	defer dc.Close()
+
+	const entries = 500_000
+	// Far enough out that nothing expires mid-test.
+	disappear := time.Now().Unix() + 3600
+
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	for i := range entries {
+		dc.CheckPokemon(encounterIDForTest(i), true, 1500, disappear)
+	}
+
+	runtime.GC()
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+
+	growth := max(int64(after.HeapAlloc)-int64(before.HeapAlloc), 0)
+	perEntry := float64(growth) / entries
+
+	// ttlcache measured ~233 B/entry; a hash set measures ~25 B. 60 B is well
+	// clear of both, so this catches a regression back to boxed entries
+	// without being brittle about map growth slack.
+	const limitPerEntry = 60
+	t.Logf("dedup cache: %.1f B/entry over %d entries (%.1f MB)", perEntry, entries, float64(growth)/(1<<20))
+	if perEntry > limitPerEntry {
+		t.Errorf("dedup cache used %.1f B/entry over %d entries (%.1f MB total), want <= %d B/entry",
+			perEntry, entries, float64(growth)/(1<<20), limitPerEntry)
+	}
+}
+
+// encounterIDForTest builds a golbat-shaped 19-digit encounter id.
+func encounterIDForTest(i int) string {
+	const base = 1_000_000_000_000_000_000
+	return fmtInt(base + i)
+}
+
+func fmtInt(v int) string {
+	return strconv.Itoa(v)
 }

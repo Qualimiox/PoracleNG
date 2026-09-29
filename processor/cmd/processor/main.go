@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
@@ -31,6 +30,7 @@ import (
 	"github.com/pokemon/poracleng/processor/internal/backup"
 	"github.com/pokemon/poracleng/processor/internal/bot"
 	"github.com/pokemon/poracleng/processor/internal/bot/commands"
+	"github.com/pokemon/poracleng/processor/internal/buttonactions"
 	"github.com/pokemon/poracleng/processor/internal/config"
 	"github.com/pokemon/poracleng/processor/internal/db"
 	"github.com/pokemon/poracleng/processor/internal/delivery"
@@ -46,19 +46,18 @@ import (
 	"github.com/pokemon/poracleng/processor/internal/logging"
 	"github.com/pokemon/poracleng/processor/internal/matching"
 	"github.com/pokemon/poracleng/processor/internal/metrics"
+	"github.com/pokemon/poracleng/processor/internal/mute"
 	"github.com/pokemon/poracleng/processor/internal/nlp"
 	"github.com/pokemon/poracleng/processor/internal/pvp"
 	"github.com/pokemon/poracleng/processor/internal/ratelimit"
 	"github.com/pokemon/poracleng/processor/internal/resources"
 	"github.com/pokemon/poracleng/processor/internal/rowtext"
 	"github.com/pokemon/poracleng/processor/internal/scanner"
+	"github.com/pokemon/poracleng/processor/internal/snapshots"
 	"github.com/pokemon/poracleng/processor/internal/state"
 	"github.com/pokemon/poracleng/processor/internal/staticmap"
 	"github.com/pokemon/poracleng/processor/internal/store"
 	"github.com/pokemon/poracleng/processor/internal/telegrambot"
-	"github.com/pokemon/poracleng/processor/internal/buttonactions"
-	"github.com/pokemon/poracleng/processor/internal/mute"
-	"github.com/pokemon/poracleng/processor/internal/snapshots"
 	"github.com/pokemon/poracleng/processor/internal/tracker"
 	"github.com/pokemon/poracleng/processor/internal/uicons"
 	"github.com/pokemon/poracleng/processor/internal/validation"
@@ -72,10 +71,14 @@ func main() {
 	clearGuildSlash := flag.Bool("clear-guild-slash-commands", false, "Clear all guild-scoped slash commands at startup for the guilds listed in [discord.slash_commands] (use when switching from register_globally=false to true)")
 	flag.Parse()
 
-	// Register build info from version.go + Go's embedded VCS metadata
-	buildVersion, buildCommit, buildDate := readBuildInfo()
+	// Register build info from version.go + ldflag-injected / VCS metadata
+	buildVersion, buildCommit, buildBranch, buildDate := readBuildInfo()
 	metrics.BuildInfo.WithLabelValues(buildVersion, buildCommit, buildDate).Set(1)
 	api.Version = buildVersion
+	displayVersion := buildVersion
+	if buildBranch != "" {
+		displayVersion += "-" + buildBranch
+	}
 
 	cfg, err := config.Load(*baseDir)
 	if err != nil {
@@ -102,7 +105,7 @@ func main() {
 	logBuf := logbuffer.New(200, 50)
 	log.AddHook(logbuffer.NewHook(logBuf))
 
-	log.Infof("Poracle processor %s (commit %s, built %s)", buildVersion, buildCommit, buildDate)
+	log.Infof("Poracle processor %s (commit %s, built %s)", displayVersion, buildCommit, buildDate)
 
 	// Now that logging is set up, report any override layering. The status
 	// was computed during config.Load() but couldn't be logged before
@@ -334,27 +337,59 @@ func main() {
 	apiGroup := r.Group("/api")
 	apiGroup.Use(api.RequireSecretGin(cfg.Processor.APISecret))
 
-	// Reload
-	apiGroup.POST("/reload", api.HandleReload(func() error {
-		return state.Load(stateMgr, database, summaryScheduleStore)
-	}))
-	apiGroup.GET("/reload", api.HandleReload(func() error {
-		return state.Load(stateMgr, database, summaryScheduleStore)
-	}))
-	apiGroup.POST("/geofence/reload", api.HandleReload(func() error {
-		return state.LoadWithGeofences(stateMgr, database, summaryScheduleStore, cfg.Geofence)
-	}))
-	apiGroup.GET("/geofence/reload", api.HandleReload(func() error {
-		return state.LoadWithGeofences(stateMgr, database, summaryScheduleStore, cfg.Geofence)
-	}))
+	// Wire the huma API: serves /openapi.json and /docs publicly, and now serves
+	// the migrated in-place endpoints (reloads, with more to come) on the shared
+	// instance mounted on the authenticated /api group.
+	humaAPI := api.NewHumaAPI(r, apiGroup, buildVersion)
 
-	// Weather, stats, geocode, test
-	apiGroup.GET("/weather", api.HandleWeather(proc.weather))
-	apiGroup.GET("/stats/rarity", api.HandleStats(func() any { return proc.stats.ExportGroups() }))
-	apiGroup.GET("/stats/shiny", api.HandleStats(func() any { return proc.stats.ExportShinyStats() }))
-	apiGroup.GET("/stats/shiny-possible", api.HandleStats(func() any { return proc.stats.ExportShinyPossible() }))
-	apiGroup.POST("/test", api.HandleTest(proc))
-	apiGroup.GET("/geocode/forward", api.HandleGeocode(proc.enricher.Geocoder))
+	// NOTE: every api.RegisterX call below also lives in registerAllHumaOpsForTest
+	// (internal/api/huma_openapi_golden_test.go), which drives the package-api
+	// golden OpenAPI spec test. The six autocreate ops (registerAutocreateHuma /
+	// registerAutocreateTemplatesHuma, registered further down) can't live in
+	// package api — they depend on *discordbot.Bot, and api → discordbot →
+	// bot/commands → api is an import cycle — so they're guarded by a sibling
+	// golden in this package (huma_autocreate_golden_test.go). When you add,
+	// remove, or rename a huma op here, mirror it in the matching golden test and
+	// regenerate:
+	//   UPDATE_GOLDEN=1 go test ./internal/api/ -run TestOpenAPIGolden
+	//   UPDATE_GOLDEN=1 go test ./cmd/processor/ -run TestAutocreateOpenAPIGolden
+
+	// Reload (migrated to huma, in place — same paths, same {"status":"ok"} body).
+	// Each variant carries a distinct summary/description so /docs documents
+	// exactly what it reloads. GET and POST share the same text per path.
+	const (
+		stateReloadSummary = "Reload tracking state from the database"
+		stateReloadDesc    = "Reloads tracking state (all registered humans plus every tracking rule across all types) from MySQL into the " +
+			"in-memory state snapshot, then atomically swaps it in. Existing geofence data (GeoJSON files / Koji) is preserved and NOT " +
+			"re-fetched — use /geofence/reload for that. Returns {\"status\":\"ok\"} once the swap completes."
+
+		geofenceReloadSummary = "Full reload including geofences from disk + Koji"
+		geofenceReloadDesc    = "Performs a FULL reload: re-reads geofence GeoJSON files from disk and re-fetches Koji geofences, rebuilds the " +
+			"spatial index, then reloads tracking state (humans + all tracking rules) from MySQL and atomically swaps the new snapshot in. " +
+			"Heavier than /reload (which skips the geofence step). Returns {\"status\":\"ok\"} on success."
+
+		dtsReloadSummary = "Reload DTS templates and partials from disk"
+		dtsReloadDesc    = "Reloads DTS message templates and Handlebars partials from config/dts.json and config/dts/ (falling back to the " +
+			"bundled fallbacks/ defaults), rebuilding the in-memory template set. Does NOT touch tracking state or geofences. " +
+			"Returns {\"status\":\"ok\"} once templates are reloaded."
+	)
+	api.RegisterReload(humaAPI, "post-reload", http.MethodPost, "/reload", stateReloadSummary, stateReloadDesc, func() error { return state.Load(stateMgr, database, summaryScheduleStore) })
+	api.RegisterReload(humaAPI, "get-reload", http.MethodGet, "/reload", stateReloadSummary, stateReloadDesc, func() error { return state.Load(stateMgr, database, summaryScheduleStore) })
+	api.RegisterReload(humaAPI, "post-geofence-reload", http.MethodPost, "/geofence/reload", geofenceReloadSummary, geofenceReloadDesc, func() error { return state.LoadWithGeofences(stateMgr, database, summaryScheduleStore, cfg.Geofence) })
+	api.RegisterReload(humaAPI, "get-geofence-reload", http.MethodGet, "/geofence/reload", geofenceReloadSummary, geofenceReloadDesc, func() error { return state.LoadWithGeofences(stateMgr, database, summaryScheduleStore, cfg.Geofence) })
+
+	// Weather, stats, geocode (migrated to huma, in place — same paths, same
+	// success JSON, problem+json errors). test stays on gin below.
+	api.RegisterWeather(humaAPI, proc.weather)
+	api.RegisterStatsRarity(humaAPI, proc.stats.ExportGroups)
+	api.RegisterStatsShiny(humaAPI, proc.stats.ExportShinyStats)
+	api.RegisterStatsShinyPossible(humaAPI, proc.stats.ExportShinyPossible)
+	api.RegisterGeocode(humaAPI, proc.enricher.Geocoder)
+	api.RegisterGeocodeReverse(humaAPI, proc.enricher.Geocoder)
+
+	// poracle-test (migrated to huma, in place — same path, same {"status":"ok"}
+	// body, open `webhook` request part, problem+json errors).
+	api.RegisterTest(humaAPI, proc)
 
 	// Geofence data and tile generation endpoints
 	tileDeps := api.TileDeps{
@@ -363,15 +398,15 @@ func main() {
 		ImgUicons: proc.enricher.ImgUicons,
 		Weather:   proc.weather,
 	}
-	geofence := apiGroup.Group("/geofence")
-	geofence.GET("/all/hash", api.HandleGeofenceHash(stateMgr))
-	geofence.GET("/all/geojson", api.HandleGeofenceGeoJSON(stateMgr))
-	geofence.GET("/all", api.HandleGeofenceAll(stateMgr))
-	geofence.GET("/weatherMap/:lat/:lon", api.HandleWeatherMap(tileDeps))
-	geofence.GET("/locationMap/:lat/:lon", api.HandleLocationMap(tileDeps))
-	geofence.GET("/distanceMap/:lat/:lon/:distance", api.HandleDistanceMap(tileDeps))
-	geofence.POST("/overviewMap", api.HandleOverviewMap(tileDeps))
-	geofence.GET("/:area/map", api.HandleGeofenceAreaMap(tileDeps))
+	// Geofence data reads (migrated to huma, in place — same paths, same
+	// {status, X} bodies, problem+json errors). Registered at full paths
+	// relative to /api. The tile routes below stay on gin.
+	api.RegisterGeofenceHash(humaAPI, stateMgr)
+	api.RegisterGeofenceGeoJSON(humaAPI, stateMgr)
+	api.RegisterGeofenceAll(humaAPI, stateMgr)
+	// Geofence tile-URL endpoints (migrated to huma, in place — same paths,
+	// same {status, url} bodies, problem+json errors).
+	api.RegisterTileEndpoints(humaAPI, api.NewHumaTileDeps(tileDeps))
 
 	// Tracking CRUD endpoints (registered after proc is created so enricher/scanner are available)
 	defaultTemplate := "1"
@@ -392,17 +427,54 @@ func main() {
 		Config:       cfg,
 		Translations: proc.enricher.Translations,
 		Dispatcher:   proc.dispatcher,
+		Summaries:    summaryScheduleStore,
+		Mutes:        proc.muteStore,
 		ReloadFunc:   proc.triggerReload,
 	}
+	// Strict v2 tracking surface (huma). v1 gin routes below are left untouched
+	// (frozen). The v2 pokemon endpoints are the worked example the other 10
+	// tracking types fan out from.
+	api.RegisterV2TrackingPokemon(humaAPI, trackingDeps)
+	api.RegisterV2TrackingNest(humaAPI, trackingDeps)
+	api.RegisterV2TrackingLure(humaAPI, trackingDeps)
+	api.RegisterV2TrackingMaxbattle(humaAPI, trackingDeps)
+	api.RegisterV2TrackingGym(humaAPI, trackingDeps)
+	api.RegisterV2TrackingFort(humaAPI, trackingDeps)
+	api.RegisterV2TrackingRaid(humaAPI, trackingDeps)
+	api.RegisterV2TrackingEgg(humaAPI, trackingDeps)
+	api.RegisterV2TrackingQuest(humaAPI, trackingDeps)
+	api.RegisterV2TrackingInvasion(humaAPI, trackingDeps)
+	api.RegisterV2TrackingIncident(humaAPI, trackingDeps)
+	// MUST follow every per-type register above so the snapshot provider
+	// registry is fully populated before the snapshot endpoint reads it.
+	api.RegisterV2TrackingSnapshot(humaAPI, trackingDeps)
+
+	// Strict v2 humans surface (huma). Re-exposes v1's human actions with typed
+	// inputs + problem+json; v1 gin human routes below stay frozen.
+	api.RegisterV2Humans(humaAPI, trackingDeps)
+
+	// Strict v2 saved-locations CRUD (huma). Re-exposes v1's location actions
+	// plus a new PUT (update coords); v1 gin location routes stay frozen.
+	api.RegisterV2Locations(humaAPI, trackingDeps)
+
+	// Strict v2 profiles surface (huma, sub-resource of human). Re-exposes v1's
+	// profile actions with a strict typed active_hours schema; v1 gin profile
+	// routes stay frozen.
+	api.RegisterV2Profiles(humaAPI, trackingDeps)
+
+	// Strict v2 mutes surface (huma, sub-resource of human) over the in-memory
+	// mute store — net-new in v2 (the bot/buttons were the only mute writers).
+	api.RegisterV2Mutes(humaAPI, trackingDeps)
+
 	tracking := apiGroup.Group("/tracking")
-	// Pokemon (monster) tracking
+	tracking.GET("/pokemon/refresh", api.HandleReload(func() error {
+		return state.Load(stateMgr, database, summaryScheduleStore)
+	}))
+	// Pokemon tracking
 	tracking.GET("/pokemon/:id", api.HandleGetMonster(trackingDeps))
 	tracking.POST("/pokemon/:id", api.HandleCreateMonster(trackingDeps))
 	tracking.DELETE("/pokemon/:id/byUid/:uid", api.HandleDeleteMonster(trackingDeps))
 	tracking.POST("/pokemon/:id/delete", api.HandleBulkDeleteMonster(trackingDeps))
-	tracking.GET("/pokemon/refresh", api.HandleReload(func() error {
-		return state.Load(stateMgr, database, summaryScheduleStore)
-	}))
 	// Raid tracking
 	tracking.GET("/raid/:id", api.HandleGetRaid(trackingDeps))
 	tracking.POST("/raid/:id", api.HandleCreateRaid(trackingDeps))
@@ -464,12 +536,22 @@ func main() {
 		Config: cfg,
 		Humans: humanStore,
 	}
+
+	// Strict v2 roles surface (huma): list/add(POST)/remove(DELETE)/admin-roles.
+	// Re-exposes v1's role actions with REST-clean verbs; v1 gin role routes
+	// below stay frozen.
+	api.RegisterV2Roles(humaAPI, roleDeps)
+
 	humans := apiGroup.Group("/humans")
 	humans.GET("/one/:id", api.HandleGetOneHuman(trackingDeps))
 	humans.GET("/:id", api.HandleGetHumanAreas(trackingDeps))
 	humans.GET("/:id/roles", api.HandleGetRoles(roleDeps))
 	humans.GET("/:id/getAdministrationRoles", api.HandleGetAdministrationRoles(roleDeps))
 	humans.GET("/:id/checkLocation/:lat/:lon", api.HandleCheckLocation(trackingDeps))
+	humans.GET("/:id/locations", api.HandleListLocations(trackingDeps))
+	humans.GET("/:id/locations/:label", api.HandleGetLocation(trackingDeps))
+	humans.POST("/:id/locations/add", api.HandleAddLocation(trackingDeps))
+	humans.POST("/:id/locations/:label/delete", api.HandleDeleteLocation(trackingDeps))
 	humans.POST("", api.HandleCreateHuman(trackingDeps))
 	humans.POST("/:id/start", api.HandleStartHuman(trackingDeps))
 	humans.POST("/:id/stop", api.HandleStopHuman(trackingDeps))
@@ -502,12 +584,10 @@ func main() {
 		Dispatch:   proc.DispatchQuestSummary,
 		ReloadFunc: proc.triggerReload,
 	}
-	summaries := apiGroup.Group("/summaries")
-	summaries.GET("/:id", api.HandleSummaryListForUser(summaryDeps))
-	summaries.GET("/:id/:alertType", api.HandleSummaryGet(summaryDeps))
-	summaries.POST("/:id/:alertType", api.HandleSummarySet(summaryDeps))
-	summaries.DELETE("/:id/:alertType", api.HandleSummaryDelete(summaryDeps))
-	summaries.POST("/:id/:alertType/trigger", api.HandleSummaryTrigger(summaryDeps))
+	// All summary ops (reads/delete/trigger + the active_hours upsert) run on
+	// the shared huma instance.
+	api.RegisterSummaries(humaAPI, summaryDeps)
+	api.RegisterSummarySet(humaAPI, summaryDeps)
 
 	// reloadDTS reloads DTS templates and returns the number of loaded entries.
 	// It is used by both the HTTP /api/dts/reload handlers and the BotDeps closure
@@ -528,35 +608,35 @@ func main() {
 
 	// DTS template endpoints
 	if proc.dtsRenderer != nil {
-		apiGroup.GET("/config/templates", api.HandleTemplateConfig(proc.dtsRenderer.Templates()))
-		apiGroup.POST("/dts/render", api.HandleDTSRender(proc.dtsRenderer.Templates()))
-		apiGroup.GET("/dts/emoji", api.HandleDTSEmoji(proc.dtsRenderer.Emoji()))
 		dtsConfigDir := filepath.Join(cfg.BaseDir, "config")
-		apiGroup.GET("/dts/templates", api.HandleDTSGetTemplates(proc.dtsRenderer.Templates()))
-		apiGroup.POST("/dts/templates", api.HandleDTSSaveTemplates(proc.dtsRenderer.Templates()))
-		apiGroup.DELETE("/dts/templates", api.HandleDTSDeleteTemplate(proc.dtsRenderer.Templates()))
-		apiGroup.PUT("/dts/templates/file", api.HandleDTSTemplateFileWrite(proc.dtsRenderer.Templates(), dtsConfigDir))
-		apiGroup.POST("/dts/enrich", api.HandleDTSEnrich(proc))
-		apiGroup.GET("/dts/fields", api.HandleDTSFieldTypes())
-		apiGroup.GET("/dts/fields/:type", api.HandleDTSFields())
-		apiGroup.GET("/dts/partials", api.HandleDTSPartials(proc.dtsRenderer.Templates()))
-		apiGroup.POST("/dts/sendtest", api.HandleDTSSendTest(proc.dispatcher, proc.dtsRenderer.Templates(), proc.dtsRenderer))
-		apiGroup.POST("/dts/reload", api.HandleReload(func() error {
-			_, err := reloadDTS()
-			return err
-		}))
-		apiGroup.GET("/dts/reload", api.HandleReload(func() error {
-			_, err := reloadDTS()
-			return err
-		}))
-		apiGroup.GET("/dts/testdata", api.HandleDTSTestdata(
-			filepath.Join(cfg.BaseDir, "config"),
+		api.RegisterReload(humaAPI, "post-dts-reload", http.MethodPost, "/dts/reload", dtsReloadSummary, dtsReloadDesc, func() error { _, err := reloadDTS(); return err })
+		api.RegisterReload(humaAPI, "get-dts-reload", http.MethodGet, "/dts/reload", dtsReloadSummary, dtsReloadDesc, func() error { _, err := reloadDTS(); return err })
+
+		// DTS render/save/enrich/sendtest + config/templates (migrated to huma,
+		// in place — same paths, same freeform success JSON, problem+json
+		// errors). Open request bodies (view map, polymorphic template,
+		// arbitrary webhook). Stay gated behind dtsRenderer != nil.
+		api.RegisterDTSWrites(
+			humaAPI,
+			proc.dtsRenderer.Templates(),
+			proc,
+			proc.dispatcher,
+			proc.dtsRenderer,
+		)
+
+		// DTS editor read endpoints (migrated to huma, in place — same paths,
+		// same success JSON, problem+json errors). Stay gated behind
+		// dtsRenderer != nil so they don't exist when DTS rendering is disabled.
+		api.RegisterDTSReads(
+			humaAPI,
+			proc.dtsRenderer.Emoji(),
+			proc.dtsRenderer.Templates(),
+			dtsConfigDir,
 			filepath.Join(cfg.BaseDir, "fallbacks"),
-		))
+		)
 	}
 
 	// Config and master data endpoints
-	apiGroup.GET("/config/poracleWeb", api.HandleConfigPoracleWeb(cfg))
 	configDeps := api.ConfigDeps{
 		Cfg:       cfg,
 		ConfigDir: filepath.Join(cfg.BaseDir, "config"),
@@ -566,27 +646,56 @@ func main() {
 			proc.triggerReload()
 		},
 	}
-	apiGroup.GET("/config/schema", api.HandleConfigSchema())
-	apiGroup.GET("/config/values", api.HandleConfigValues(configDeps))
-	apiGroup.POST("/config/values", api.HandleConfigSave(configDeps))
-	apiGroup.POST("/config/validate", api.HandleConfigValidate(configDeps))
-	apiGroup.GET("/masterdata/monsters", api.HandleMasterdataMonsters(proc.enricher.GameData, proc.enricher.Translations))
-	apiGroup.GET("/masterdata/grunts", api.HandleMasterdataGrunts(proc.enricher.GameData))
+	// Config schema (migrated to huma, in place — same {status, sections} body).
+	api.RegisterConfigSchema(humaAPI)
+	// Config poracleWeb / values / validate (migrated to huma, in place — same
+	// paths, same success JSON, open bodies, problem+json errors). POST
+	// /config/values preserves the config.toml rewrite side effect.
+	api.RegisterConfigPoracleWeb(humaAPI, cfg)
+	api.RegisterConfigValues(humaAPI, configDeps)
+	api.RegisterConfigSave(humaAPI, configDeps)
+	api.RegisterConfigValidate(humaAPI, configDeps)
+	// Masterdata reads (migrated to huma, in place — typed maps re-marshalled to
+	// the same JSON the gin handlers produced).
+	api.RegisterMasterdataMonsters(humaAPI, proc.enricher.GameData, proc.enricher.Translations)
+	api.RegisterMasterdataGrunts(humaAPI, proc.enricher.GameData, proc.enricher.Translations)
+	api.RegisterMasterdataCostumes(humaAPI, proc.enricher.GameData, proc.enricher.Translations)
+	// Recently-seen bosses/rewards/costumes/forms, for clients populating
+	// pickers with what is live rather than the whole masterfile.
+	api.RegisterV2Activity(humaAPI, proc.recentActivity)
 
-	// Snapshot inspection — admin-only via the api_secret middleware. Returns
-	// 503 if [snapshots] enabled = false. See docs/buttons-and-snapshots/.
-	apiGroup.GET("/snapshots/:messageID", api.HandleSnapshotGet(proc.snapshotStore))
+	// Snapshot inspection (migrated to huma, in place) — admin-only via the
+	// api_secret middleware. Returns 503 if [snapshots] enabled = false; 404 on
+	// a miss. See docs/buttons-and-snapshots/.
+	api.RegisterSnapshotGet(humaAPI, proc.snapshotStore)
 
 	// Button action registry — config editor reads this to surface the
-	// dropdown of action choices + their accepted scopes/params.
-	apiGroup.GET("/dts/actions", api.HandleButtonActionsList(proc.buttonActions))
+	// dropdown of action choices + their accepted scopes/params. Migrated to
+	// huma, in place — same path, same {"actions":[...]} body. Registered
+	// unconditionally (outside the dtsRenderer block, matching legacy).
+	api.RegisterButtonActions(humaAPI, proc.buttonActions)
 
 	// Resolution cache — populated after bot init below
 	resolveCache := api.NewResolveCache()
 
-	// Delivery endpoint — accepts pre-rendered jobs
-	apiGroup.POST("/deliverMessages", api.HandleDeliverMessages(proc.dispatcher))
-	apiGroup.POST("/postMessage", api.HandleDeliverMessages(proc.dispatcher)) // legacy alias
+	// Delivery endpoint — accepts pre-rendered jobs (migrated to huma, in place
+	// — same paths, same {"status":"ok","queued":N} body, []Job request,
+	// problem+json errors). /postMessage is a legacy alias serving identically;
+	// only the docs differ so the OpenAPI explains which one to use.
+	const (
+		deliverMessagesSummary = "Deliver pre-rendered messages"
+		deliverMessagesDesc    = "Canonical delivery endpoint. Accepts an array of pre-rendered delivery jobs — each job carries a destination " +
+			"(target + type) and a `message` field holding the already-rendered platform payload (arbitrary JSON) — and dispatches them to the " +
+			"delivery system. Jobs missing target or type are silently skipped. Returns {\"status\":\"ok\",\"queued\":N} where N is the number of " +
+			"jobs accepted. Responds 503 when the delivery dispatcher is not configured."
+
+		postMessageSummary = "Deliver pre-rendered messages (legacy alias)"
+		postMessageDesc    = "Legacy/backward-compatibility alias of POST /deliverMessages — identical request body and behaviour (dispatches an " +
+			"array of pre-rendered delivery jobs, skips jobs missing target/type, returns {\"status\":\"ok\",\"queued\":N}, 503 when the dispatcher " +
+			"is unconfigured). Retained for older clients; new clients should use /deliverMessages."
+	)
+	api.RegisterDeliverMessages(humaAPI, "post-deliver-messages", "/deliverMessages", deliverMessagesSummary, deliverMessagesDesc, proc.dispatcher)
+	api.RegisterDeliverMessages(humaAPI, "post-message", "/postMessage", postMessageSummary, postMessageDesc, proc.dispatcher)
 
 	// Command framework — shared by API endpoint and Discord/Telegram bots
 	var cmdLanguages []string
@@ -701,6 +810,10 @@ func main() {
 		interval := time.Duration(cfg.Tuning.ReloadIntervalSecs) * time.Second
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
+		// Tracks the last-seen delivery.Dispatcher backpressure counter so the
+		// lane-summary block below can detect whether it advanced since the
+		// previous tick (escalates the status line to WARN when it has).
+		var lastBackpressureSeen int64
 		for {
 			select {
 			case <-periodicDone:
@@ -769,6 +882,33 @@ func main() {
 				metrics.DeliveryWebhookQueueDepth.Set(float64(proc.dispatcher.WebhookDepth()))
 				metrics.DeliveryTelegramQueueDepth.Set(float64(proc.dispatcher.TelegramDepth()))
 				metrics.DeliveryTrackerSize.Set(float64(proc.dispatcher.TrackerSize()))
+
+				total, active, maxDepth, deepestTarget, nearCap := proc.dispatcher.LaneStats()
+				statusParts = append(statusParts, fmt.Sprintf("Lanes:%d active, %d queued, deepest=%d (%s), %d near-cap",
+					active, total, maxDepth, deepestTarget, nearCap))
+				metrics.DeliveryActiveLanes.Set(float64(active))
+				metrics.DeliveryLaneQueued.Set(float64(total))
+				metrics.DeliveryLaneMaxDepth.Set(float64(maxDepth))
+				metrics.DeliveryLanesNearCapacity.Set(float64(nearCap))
+
+				// Escalate to WARN when a lane nears capacity OR a lane hit
+				// capacity since the last sample — the "developing bad
+				// situation" signal. Say "shedding" rather than "backing up"
+				// once anything has actually been discarded: enqueue never
+				// blocks, so a full lane means messages were thrown away, not
+				// merely delayed.
+				bp := proc.dispatcher.BackpressureCount()
+				shed := proc.dispatcher.ShedCount()
+				buf := proc.dispatcher.PerRouteBuffer()
+				if (buf > 0 && maxDepth >= buf*8/10) || bp > lastBackpressureSeen {
+					state := "backing up"
+					if shed > 0 {
+						state = "shedding messages"
+					}
+					log.Warnf("[Status] delivery %s: %d lanes, %d queued, deepest lane %d/%d (%s), %d near-cap, lane-full=%d, shed=%d",
+						state, active, total, maxDepth, buf, deepestTarget, nearCap, bp, shed)
+				}
+				lastBackpressureSeen = bp
 			}
 			log.Infof("[Status] %s", strings.Join(statusParts, " | "))
 			if webhooks == 0 {
@@ -812,7 +952,7 @@ func main() {
 		SnapshotStore:      proc.snapshotStore,
 		ButtonActions:      proc.buttonActions,
 		DTSRenderer:        proc.dtsRenderer,
-		ReloadDTS: reloadDTS,
+		ReloadDTS:          reloadDTS,
 		EmojiReload: func() (int, error) {
 			if cmdEmoji == nil {
 				return 0, errors.New("emoji config not loaded (DTS renderer not configured)")
@@ -832,7 +972,7 @@ func main() {
 		ReloadState: func() error {
 			return state.Load(stateMgr, database, summaryScheduleStore)
 		},
-		WebhookRate: webhookHandler.RateSnapshot,
+		WebhookRate:  webhookHandler.RateSnapshot,
 		AlertLimiter: proc.rateLimiter,
 		DiscordRate:  proc.dispatcher.DiscordRateSnapshot,
 		TelegramRate: proc.dispatcher.TelegramRateSnapshot,
@@ -924,6 +1064,42 @@ func main() {
 			}
 			return gscope, guildScopes, nil
 		},
+		SlashList: func(guildID string) ([]bot.SlashScopeCommands, error) {
+			d := discordBotSlashDispatcher(discordBot)
+			if d == nil {
+				return nil, slash.ErrSlashNotConfigured
+			}
+			// Which scopes to read: the configured ones, plus the guild the
+			// command was invoked from. Guild-scoped registrations get
+			// different ids per guild, so an operator running this inside a
+			// guild must see that guild's ids even if it isn't in [guilds].
+			var scopes []string
+			if d.IsGlobal() {
+				scopes = append(scopes, "")
+			}
+			scopes = append(scopes, d.ConfiguredGuilds()...)
+			if guildID != "" && !slices.Contains(scopes, guildID) {
+				scopes = append(scopes, guildID)
+			}
+
+			out := make([]bot.SlashScopeCommands, 0, len(scopes))
+			for _, scope := range scopes {
+				mentions, err := d.ListRegistered(scope)
+				if err != nil {
+					return nil, err
+				}
+				name := scope
+				if name == "" {
+					name = "global"
+				}
+				cmds := make([]bot.SlashCommandMention, 0, len(mentions))
+				for _, m := range mentions {
+					cmds = append(cmds, bot.SlashCommandMention{Path: m.Path, ID: m.ID})
+				}
+				out = append(out, bot.SlashScopeCommands{Name: name, Commands: cmds})
+			}
+			return out, nil
+		},
 	}
 
 	// /api/command — routes through the full BotDeps graph so every admin
@@ -933,7 +1109,7 @@ func main() {
 	{
 		apiCmdDeps := sharedBotDeps
 		apiCmdDeps.Parser = cmdParser
-		apiGroup.POST("/command", api.HandleCommand(&apiCmdDeps))
+		api.RegisterCommand(humaAPI, &apiCmdDeps)
 	}
 
 	gatewayToken := cfg.Discord.DiscordGatewayToken()
@@ -1020,13 +1196,17 @@ func main() {
 	if telegramBot != nil {
 		resolveDeps.TelegramAPI = telegramBot.API()
 	}
-	apiGroup.POST("/resolve", api.HandleResolve(resolveDeps))
-	apiGroup.POST("/autocreate/run", handleAutocreateRun(cfg, discordBot))
-	apiGroup.GET("/autocreate/templates", handleGetChannelTemplates(cfg))
-	apiGroup.POST("/autocreate/templates", handlePostChannelTemplates(cfg))
-	apiGroup.POST("/autocreate/templates/validate", handleValidateChannelTemplates())
-	apiGroup.DELETE("/autocreate/templates/:name", handleDeleteChannelTemplate(cfg))
-	apiGroup.GET("/autocreate/templates/schema", handleGetChannelTemplatesSchema())
+	// Resolve (migrated to huma, in place — same path, same freeform success
+	// body, open request, problem+json errors).
+	api.RegisterResolve(humaAPI, resolveDeps)
+	// autocreate run / delete-template / templates-schema migrated to huma,
+	// in place — same paths, same success JSON, problem+json errors. These six
+	// autocreate ops are guarded by huma_autocreate_golden_test.go (this package),
+	// not the package-api golden — see the NOTE near the humaAPI setup above.
+	registerAutocreateHuma(humaAPI, cfg, discordBot)
+	// autocreate templates GET/POST + validate migrated to huma, in place —
+	// open (raw-JSON) bodies, same success JSON, problem+json errors.
+	registerAutocreateTemplatesHuma(humaAPI, cfg)
 
 	// Backup-cleanup sweeper: walks config/backups/ on startup and every
 	// 24h, removes files older than the retention window.
@@ -1060,7 +1240,9 @@ func main() {
 	// 1. Stop accepting new requests — no more webhooks enter the pipeline
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	server.Shutdown(ctx)
+	if err := server.Shutdown(ctx); err != nil {
+		log.Warnf("HTTP server shutdown: %v", err)
+	}
 	log.Infof("HTTP server stopped")
 
 	// 2. Stop bots (no more command processing)
@@ -1080,31 +1262,10 @@ func main() {
 	log.Infof("Shutdown complete")
 }
 
-func readBuildInfo() (version, commit, date string) {
-	// Static version from version.go (bumped per release).
-	// Commit and build date come from Go's embedded VCS info.
-	version, commit, date = processor.Version, "unknown", "unknown"
-	info, ok := debug.ReadBuildInfo()
-	if !ok {
-		return
-	}
-	for _, s := range info.Settings {
-		switch s.Key {
-		case "vcs.revision":
-			if len(s.Value) > 8 {
-				commit = s.Value[:8]
-			} else {
-				commit = s.Value
-			}
-		case "vcs.time":
-			date = s.Value
-		case "vcs.modified":
-			if s.Value == "true" {
-				commit += "-dirty"
-			}
-		}
-	}
-	return
+func readBuildInfo() (version, commit, branch, date string) {
+	// Single source of truth: ldflag-injected build vars (Docker / local build
+	// scripts) with a fallback to Go's embedded VCS metadata. See processor.BuildInfo.
+	return processor.BuildInfo()
 }
 
 // ProcessorService ties together all matching/tracking components.
@@ -1235,7 +1396,6 @@ func NewProcessorService(cfg *config.Config, stateMgr *state.Manager, database *
 		LevelCaps:                  cfg.PVP.LevelCaps,
 		PVPFilterMaxRank:           cfg.PVP.PVPFilterMaxRank,
 		PVPEvolutionDirectTracking: cfg.PVP.PVPEvolutionDirectTracking,
-		IncludeMegaEvolution:       cfg.PVP.IncludeMegaEvolution,
 		PVPFilterGreatMinCP:        cfg.PVP.PVPFilterGreatMinCP,
 		PVPFilterUltraMinCP:        cfg.PVP.PVPFilterUltraMinCP,
 		PVPFilterLittleMinCP:       cfg.PVP.PVPFilterLittleMinCP,
@@ -1251,13 +1411,13 @@ func NewProcessorService(cfg *config.Config, stateMgr *state.Manager, database *
 	log.Infof("Game data loaded: %d monsters, %d moves, %d types", len(gd.Monsters), len(gd.Moves), len(gd.Types))
 
 	// Initialize weather type boost from util.json (replaces hardcoded fallback)
-	if gd != nil && gd.Util != nil {
+	if gd.Util != nil {
 		gamedata.InitWeatherTypeBoost(gd.Util)
 	}
 
 	var activePokemon *tracker.ActivePokemonTracker
 	var pokemonTypes *gamedata.PokemonTypes
-	if cfg.Weather.ShowAlteredPokemon && gd != nil {
+	if cfg.Weather.ShowAlteredPokemon {
 		pokemonTypes = gamedata.PokemonTypesFromGameData(gd.Monsters)
 		activePokemon = tracker.NewActivePokemonTracker(50)
 		log.Info("Active pokemon tracking enabled (from game data)")
@@ -1268,7 +1428,11 @@ func NewProcessorService(cfg *config.Config, stateMgr *state.Manager, database *
 			cfg.Locale.TimeFormat, geo.SupportedLocales())
 	}
 
-	weatherTracker := tracker.NewWeatherTracker()
+	// Idle expiry has to outlast the configured forecast cadence, or
+	// forecast-only cells get reclaimed between pushes.
+	weatherTracker := tracker.NewWeatherTracker(
+		tracker.WithForecastRefreshInterval(cfg.Weather.ForecastRefreshInterval),
+	)
 	timeLayout := geo.ConvertTimeFormat(cfg.Locale.Time, cfg.Locale.TimeFormat)
 	eventChecker := enrichment.NewPogoEventChecker(timeLayout)
 
@@ -1417,6 +1581,27 @@ func NewProcessorService(cfg *config.Config, stateMgr *state.Manager, database *
 		}
 	}
 
+	// Nearest-street-intersection lookups (GeoNames). Shares the reverse-
+	// geocoder's pogreb cache when one exists, so intersection results live in
+	// the same on-disk DB (separate key namespace) and repeat sightings at a
+	// fixed stop don't re-hit GeoNames.
+	if len(cfg.Geocoding.IntersectionUsers) > 0 {
+		var sharedCache *geocoding.Cache
+		if geocoder != nil {
+			sharedCache = geocoder.Cache()
+		}
+		enricher.Intersection = geocoding.NewIntersection(geocoding.IntersectionConfig{
+			Usernames:        cfg.Geocoding.IntersectionUsers,
+			Cache:            sharedCache,
+			CacheDetail:      cfg.Geocoding.CacheDetail,
+			TimeoutMs:        cfg.Tuning.GeocodingTimeout,
+			Concurrency:      cfg.Tuning.GeocodingConcurrency,
+			FailureThreshold: cfg.Tuning.GeocodingFailureThreshold,
+			CooldownMs:       cfg.Tuning.GeocodingCooldownMs,
+		})
+		log.Infof("GeoNames intersection lookups enabled (%d user(s), cache shared=%t)", len(cfg.Geocoding.IntersectionUsers), sharedCache != nil)
+	}
+
 	// Stats tracker (rarity + shiny, shared rolling window)
 	statsTracker := tracker.NewStatsTracker(tracker.StatsConfig{
 		MinSampleSize:       cfg.Stats.MinSampleSize,
@@ -1438,6 +1623,9 @@ func NewProcessorService(cfg *config.Config, stateMgr *state.Manager, database *
 			LocalFirstFetchHOD:      cfg.Weather.LocalFirstFetchHOD,
 			SmartForecast:           cfg.Weather.SmartForecast,
 		}, weatherTracker)
+		// The forecast client keys its own maps by the same cell ids, so it
+		// has to release them when the tracker reclaims a cell.
+		weatherTracker.SetOnEvict(awClient.ForgetCells)
 		enricher.ForecastProvider = awClient
 		log.Infof("AccuWeather forecast enabled with %d API keys", len(cfg.Weather.AccuWeatherAPIKeys))
 	}
@@ -1536,6 +1724,7 @@ func NewProcessorService(cfg *config.Config, stateMgr *state.Manager, database *
 			PVPEvolutionDirectTracking: cfg.PVP.PVPEvolutionDirectTracking,
 			StrictLocations:            cfg.Area.StrictLocations,
 			AreaSecurityEnabled:        cfg.Area.Enabled,
+			IncludeMegaEvolution:       cfg.PVP.IncludeMegaEvolution,
 		},
 		raidMatcher:      &matching.RaidMatcher{StrictLocations: cfg.Area.StrictLocations, AreaSecurityEnabled: cfg.Area.Enabled},
 		invasionMatcher:  &matching.InvasionMatcher{StrictLocations: cfg.Area.StrictLocations, AreaSecurityEnabled: strictAreas},
@@ -1659,6 +1848,10 @@ func (ps *ProcessorService) Close() {
 		ps.enricher.StaticMap.Close()
 	}
 	ps.duplicates.Close()
+	// Weather eviction runs on its own ticker and touches the same maps the
+	// enrichment path reads, so it stops here with the other trackers, once
+	// the webhook and render workers are already quiescent.
+	ps.weather.Close()
 	ps.rateLimiter.Close()
 	// Persist gym state cache for restart
 	if err := ps.gymState.Save(); err != nil {

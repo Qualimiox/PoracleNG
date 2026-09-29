@@ -8,17 +8,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pokemon/poracleng/processor/internal/bot"
 	processor "github.com/pokemon/poracleng/processor"
+	"github.com/pokemon/poracleng/processor/internal/bot"
 )
 
 // Hard-coded indicator thresholds for the status snapshot. A
 // [processor.status] config section is deferred to a later task; these
 // defaults match thresholds already used elsewhere in the processor.
 const (
-	// webhookFloorMinutes controls the "active install just stopped
-	// receiving" trigger: Per60Min > 0 but Per5Min == 0.
-	webhookFloorMinutes = 5
 	// renderQueueWarnPercent matches the existing tile-skip threshold
 	// in render.go (80% full → start skipping tile generation).
 	renderQueueWarnPercent = 80
@@ -214,7 +211,7 @@ func renderWebhooksSection(ctx *bot.CommandContext, tr translator, verbose bool)
 		}
 		for i := 0; i < limit; i++ {
 			sb.WriteString("\n    ")
-			sb.WriteString(fmt.Sprintf("%s: %d", entries[i].name, entries[i].count))
+			fmt.Fprintf(&sb, "%s: %d", entries[i].name, entries[i].count)
 		}
 	}
 
@@ -276,8 +273,10 @@ func renderDeliverySection(ctx *bot.CommandContext, tr translator, verbose bool)
 	}
 
 	// Cumulative queue depth visible across all platforms — useful to
-	// see backpressure even when the per-platform in-flight counts
-	// look fine. Capacity is internal to the dispatcher.
+	// see lane saturation even when the per-platform in-flight counts
+	// look fine. Capacity is internal to the dispatcher. Note a full
+	// lane sheds its oldest message rather than blocking, so depth near
+	// capacity means loss is imminent, not merely delay.
 	sb.WriteString("\n  ")
 	sb.WriteString(tr.Tf("cmd.poracle_admin.status.label.delivery_queue_depth",
 		totalQueueDepth))
@@ -331,10 +330,10 @@ func renderDiscordRateSection(ctx *bot.CommandContext, tr translator, verbose bo
 		for _, r := range snap.Routes {
 			if r.Limit > 0 && r.Remaining < r.Limit {
 				sb.WriteString("\n    ")
-				sb.WriteString(fmt.Sprintf("%s: %d/%d (reset %s)",
+				fmt.Fprintf(&sb, "%s: %d/%d (reset %s)",
 					r.Route, r.Remaining, r.Limit,
 					r.ResetAt.UTC().Format("15:04:05"),
-				))
+				)
 			}
 		}
 	}
@@ -600,7 +599,6 @@ func renderMySQLSection(ctx *bot.CommandContext, tr translator) string {
 
 	return sb.String()
 }
-
 
 // typeCount is a (name, count) pair used to sort webhook breakdown
 // entries by count descending.

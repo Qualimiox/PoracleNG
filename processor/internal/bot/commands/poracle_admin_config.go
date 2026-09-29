@@ -249,7 +249,7 @@ func paConfigFull(ctx *bot.CommandContext) []bot.Reply {
 		if sb.Len() > 0 {
 			sb.WriteString("\n\n")
 		}
-		sb.WriteString(fmt.Sprintf("[%s]", sec.name))
+		fmt.Fprintf(&sb, "[%s]", sec.name)
 		body := renderSection(sec.name, sec.value, "")
 		if body != "" {
 			sb.WriteString("\n")
@@ -416,7 +416,7 @@ func renderValue(sb *strings.Builder, v reflect.Value, path string, indent strin
 			// If nested struct (not a special type), render as a sub-block.
 			if isNestedStruct(fv) {
 				sb.WriteString(indent)
-				sb.WriteString(fmt.Sprintf("[%s]\n", childPath))
+				fmt.Fprintf(sb, "[%s]\n", childPath)
 				renderValue(sb, fv, childPath, indent+"  ")
 				continue
 			}
@@ -450,8 +450,8 @@ func isNestedStruct(v reflect.Value) bool {
 		return false
 	}
 	t := v.Type()
-	for i := 0; i < t.NumField(); i++ {
-		ft := t.Field(i)
+	for ft := range t.Fields() {
+		ft := ft
 		if !ft.IsExported() {
 			continue
 		}

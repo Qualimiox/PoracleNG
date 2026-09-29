@@ -18,8 +18,19 @@ func (c *ProfileCommand) Name() string      { return "cmd.profile" }
 func (c *ProfileCommand) Aliases() []string { return nil }
 
 func (c *ProfileCommand) Run(ctx *bot.CommandContext, args []string) []bot.Reply {
+	if help := helpArgReply(ctx, args, "msg.profile.usage"); help != nil {
+		return []bot.Reply{*help}
+	}
+
 	if len(args) == 0 {
-		return c.listProfiles(ctx)
+		replies := c.listProfiles(ctx)
+		// Append usage hint only for the bare-call path; explicit `list`
+		// subcommand doesn't get it since the user has already proven they
+		// know !profile syntax.
+		if len(replies) > 0 {
+			replies[len(replies)-1].Text += "\n\n" + inlineUsage(ctx, "msg.profile.usage")
+		}
+		return replies
 	}
 
 	subcommand := args[0]
@@ -72,7 +83,7 @@ func (c *ProfileCommand) listProfiles(ctx *bot.CommandContext) []bot.Reply {
 		if p.ProfileNo == ctx.ProfileNo {
 			activeMarker = "*"
 		}
-		sb.WriteString(fmt.Sprintf("%d%s. %s", p.ProfileNo, activeMarker, ctx.EscapeForReply(p.Name)))
+		fmt.Fprintf(&sb, "%d%s. %s", p.ProfileNo, activeMarker, ctx.EscapeForReply(p.Name))
 
 		if len(p.Area) > 0 && ctx.AreaLogic != nil {
 			displayNames := ctx.AreaLogic.ResolveDisplayNames(p.Area)
@@ -82,7 +93,7 @@ func (c *ProfileCommand) listProfiles(ctx *bot.CommandContext) []bot.Reply {
 		}
 
 		if p.Latitude != 0 || p.Longitude != 0 {
-			sb.WriteString(fmt.Sprintf(" - location: %.5f,%.5f", p.Latitude, p.Longitude))
+			fmt.Fprintf(&sb, " - location: %.5f,%.5f", p.Latitude, p.Longitude)
 		}
 		sb.WriteByte('\n')
 
@@ -112,19 +123,14 @@ func (c *ProfileCommand) addProfile(ctx *bot.CommandContext, args []string) []bo
 	}
 	name := strings.Join(args, " ")
 
-	if err := ctx.Humans.AddProfile(ctx.TargetID, name, ""); err != nil {
+	// AddProfile reports the number it assigned. Deriving it instead — by
+	// searching back for the highest profile with a matching name — reported
+	// the wrong profile whenever the name was reused, since names are not
+	// unique and the store assigns the lowest FREE number, not max+1.
+	newNo, err := ctx.Humans.AddProfile(ctx.TargetID, name, "")
+	if err != nil {
 		log.Errorf("profile: add: %v", err)
 		return []bot.Reply{{React: "🙅"}}
-	}
-
-	// Find the new profile number
-	newNo := 0
-	if profiles, err := ctx.Humans.GetProfiles(ctx.TargetID); err == nil {
-		for _, p := range profiles {
-			if strings.EqualFold(p.Name, name) && p.ProfileNo > newNo {
-				newNo = p.ProfileNo
-			}
-		}
 	}
 
 	return []bot.Reply{{React: "✅", Text: tr.Tf("msg.profile.created", newNo, ctx.EscapeForReply(name))}}
@@ -191,67 +197,29 @@ func (c *ProfileCommand) switchProfile(ctx *bot.CommandContext, args []string) [
 }
 
 // buildDayPrefixMap creates a map from translated + English day prefixes to ISO day numbers.
+// buildDayPrefixMap returns the day prefixes the settime grammar accepts.
+// The canonical table lives in the bot package so the slash autocomplete can
+// offer exactly what this parser will accept (see bot.DayPrefixMap).
 func buildDayPrefixMap(ctx *bot.CommandContext) map[string][]int {
-	m := map[string][]int{
-		// English always accepted
-		"mon": {1}, "tue": {2}, "wed": {3}, "thu": {4},
-		"fri": {5}, "sat": {6}, "sun": {7},
-		"weekday": {1, 2, 3, 4, 5},
-		"weekend": {6, 7},
-		"every":    {1, 2, 3, 4, 5, 6, 7},
-		"everyday": {1, 2, 3, 4, 5, 6, 7},
-	}
-
-	// Add translated day abbreviations from i18n
-	// Uses arg.prefix.mon through arg.prefix.sun and arg.prefix.weekday/weekend
-	dayKeys := []struct {
-		key  string
-		days []int
-	}{
-		{"arg.prefix.mon", []int{1}},
-		{"arg.prefix.tue", []int{2}},
-		{"arg.prefix.wed", []int{3}},
-		{"arg.prefix.thu", []int{4}},
-		{"arg.prefix.fri", []int{5}},
-		{"arg.prefix.sat", []int{6}},
-		{"arg.prefix.sun", []int{7}},
-		{"arg.prefix.weekday", []int{1, 2, 3, 4, 5}},
-		{"arg.prefix.weekend", []int{6, 7}},
-		{"arg.prefix.every", []int{1, 2, 3, 4, 5, 6, 7}},
-		{"arg.prefix.everyday", []int{1, 2, 3, 4, 5, 6, 7}},
-	}
-
-	tr := ctx.Tr()
-	for _, dk := range dayKeys {
-		translated := strings.ToLower(tr.T(dk.key))
-		if translated != dk.key && translated != "" {
-			m[translated] = dk.days
-		}
-	}
-
-	return m
+	return bot.DayPrefixMap(ctx.Tr())
 }
 
 func (c *ProfileCommand) setTime(ctx *bot.CommandContext, args []string) []bot.Reply {
 	tr := ctx.Tr()
 	if len(args) == 0 {
-		return []bot.Reply{{React: "🙅", Text: tr.T("msg.profile.settime_usage")}}
+		return []bot.Reply{{React: "🙅", Text: tr.Tf("msg.profile.settime_usage", bot.CommandPrefix(ctx))}}
 	}
 
 	dayPrefixes := buildDayPrefixMap(ctx)
-	var entries []db.ActiveHourEntry
-	for _, arg := range args {
-		parsed, err := ParseSettimeArg(arg, dayPrefixes)
-		if err != nil {
-			// Matched a known form (range) but failed validation
-			// — surface the reason instead of silently dropping.
-			return []bot.Reply{{React: "🙅", Text: tr.Tf("msg.profile.settime_invalid", arg, SettimeErrorMessage(tr, err))}}
-		}
-		entries = append(entries, parsed...)
+	// Accepts several specs in one go, comma- or space-separated:
+	// the slash surface sends the whole `times` option as one token.
+	entries, err := ParseSettimeArgs(args, dayPrefixes)
+	if err != nil {
+		return []bot.Reply{{React: "🙅", Text: tr.Tf("msg.profile.settime_invalid", strings.Join(args, " "), SettimeErrorMessage(tr, err))}}
 	}
 
 	if len(entries) == 0 {
-		return []bot.Reply{{React: "🙅", Text: tr.T("msg.profile.settime_usage")}}
+		return []bot.Reply{{React: "🙅", Text: tr.Tf("msg.profile.settime_usage", bot.CommandPrefix(ctx))}}
 	}
 
 	data, _ := json.Marshal(entries)
@@ -283,7 +251,7 @@ func (c *ProfileCommand) clearTime(ctx *bot.CommandContext) []bot.Reply {
 func (c *ProfileCommand) copyTo(ctx *bot.CommandContext, args []string) []bot.Reply {
 	tr := ctx.Tr()
 	if len(args) == 0 {
-		return []bot.Reply{{React: "🙅", Text: tr.T("msg.profile.copyto_usage")}}
+		return []bot.Reply{{React: "🙅", Text: tr.Tf("msg.profile.copyto_usage", bot.CommandPrefix(ctx))}}
 	}
 
 	// Load all profiles for this user.
@@ -333,7 +301,7 @@ func (c *ProfileCommand) copyTo(ctx *bot.CommandContext, args []string) []bot.Re
 		}
 		nameMatch := false
 		for _, v := range valid {
-			if strings.ToLower(v) == strings.ToLower(p.Name) {
+			if strings.EqualFold(v, p.Name) {
 				nameMatch = true
 				break
 			}
@@ -357,7 +325,7 @@ func (c *ProfileCommand) copyTo(ctx *bot.CommandContext, args []string) []bot.Re
 	}
 
 	if len(copiedNames) == 0 && len(invalid) == 0 {
-		return []bot.Reply{{React: "🙅", Text: tr.T("msg.profile.copyto_usage")}}
+		return []bot.Reply{{React: "🙅", Text: tr.Tf("msg.profile.copyto_usage", bot.CommandPrefix(ctx))}}
 	}
 
 	ctx.TriggerReload()

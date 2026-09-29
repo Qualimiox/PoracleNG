@@ -91,7 +91,7 @@ func (e *Enricher) Invasion(lat, lon float64, expiration int64, pokestopID, poke
 	e.addMapURLs(m, lat, lon, "pokestops", pokestopID)
 
 	// Reverse geocoding
-	e.addGeoResult(m, lat, lon)
+	e.addLocationFields(m, lat, lon)
 
 	// Grunt and display type IDs for DTS templates
 	m["gruntTypeId"] = gruntTypeID
@@ -108,7 +108,7 @@ func (e *Enricher) Invasion(lat, lon float64, expiration int64, pokestopID, poke
 	if lureID != 0 {
 		tileFields["lureTypeId"] = lureID
 	}
-	pending := e.addStaticMap(m, "pokestop", lat, lon, tileFields, tileMode)
+	pending := e.addStaticMap(m, "pokestop", lat, lon, tileFields, tileMode, pokestopID)
 
 	// Grunt data
 	if e.GameData != nil {
@@ -176,6 +176,7 @@ func (e *Enricher) InvasionTranslate(base map[string]any, lat, lon float64, grun
 	tr := e.Translations.For(lang)
 	gameWeatherID := toInt(base["gameWeatherId"])
 	m["gameWeatherName"] = TranslateWeatherName(tr, gameWeatherID)
+	m["gameWeatherNameEng"] = TranslateWeatherName(e.Translations.For("en"), gameWeatherID)
 	if gameWeatherID > 0 {
 		if wInfo, ok := gd.Util.Weather[gameWeatherID]; ok {
 			m["gameWeatherEmojiKey"] = wInfo.Emoji
@@ -275,7 +276,7 @@ func (e *Enricher) InvasionTranslate(base map[string]any, lat, lon float64, grun
 		lineupMonsters := make([]map[string]any, 0, len(lineup))
 		for _, entry := range lineup {
 			nameInfo := make(map[string]any)
-			TranslateMonsterNames(nameInfo, gd, tr, entry.PokemonID, entry.Form, 0)
+			TranslateMonsterNames(nameInfo, gd, tr, entry.PokemonID, entry.Form, 0, 0)
 			lineupMonsters = append(lineupMonsters, map[string]any{
 				"id":       entry.PokemonID,
 				"formId":   entry.Form,
@@ -291,7 +292,9 @@ func (e *Enricher) InvasionTranslate(base map[string]any, lat, lon float64, grun
 	}
 
 	// Showcase rankings (displayType == 9): parse and enrich top-3 contestants.
-	e.translateShowcaseRankings(m, showcaseRaw, gd, tr, lang)
+	// pokestop_id (set by the base Invasion enrichment) is the per-event ref.
+	pokestopID, _ := base["pokestop_id"].(string)
+	e.translateShowcaseRankings(m, showcaseRaw, gd, tr, lang, pokestopID)
 
 	return m
 }
@@ -300,7 +303,7 @@ func (e *Enricher) InvasionTranslate(base map[string]any, lat, lon float64, grun
 // top-level and per-entry fields to the translation map m. When the field is
 // absent, empty, or unparseable the showcase* fields are set to safe zero
 // values so templates can always {{#if showcasePresent}} guard cleanly.
-func (e *Enricher) translateShowcaseRankings(m map[string]any, showcaseRaw json.RawMessage, gd *gamedata.GameData, tr *i18n.Translator, lang string) {
+func (e *Enricher) translateShowcaseRankings(m map[string]any, showcaseRaw json.RawMessage, gd *gamedata.GameData, tr *i18n.Translator, lang, pokestopID string) {
 	// Safe defaults — always set so templates never see missing keys.
 	m["showcasePresent"] = false
 	m["showcaseTotalEntries"] = 0
@@ -315,7 +318,7 @@ func (e *Enricher) translateShowcaseRankings(m map[string]any, showcaseRaw json.
 
 	var contest contestJSON
 	if err := json.Unmarshal(showcaseRaw, &contest); err != nil {
-		log.Debugf("showcase_rankings parse error: %v", err)
+		log.Debugf("[%s] showcase_rankings parse error: %v", pokestopID, err)
 		return
 	}
 
@@ -401,7 +404,7 @@ func (e *Enricher) translateContestEntry(ce contestEntry, gd *gamedata.GameData,
 	entry["formName"] = formName
 
 	// fullName: alignment prefix + base+form + mega wrap
-	entry["fullName"] = BuildFullNameWithAlignment(tr, nameKeys, pokemonName, formNormalised, ce.PokemonID, ce.TempEvolution, ce.Alignment)
+	entry["fullName"] = BuildFullNameWithAlignment(tr, nameKeys, pokemonName, formNormalised, ce.PokemonID, ce.TempEvolution, ce.Alignment, 0)
 
 	// Costume name (costume_N key from gamelocale)
 	costumeName := ""
@@ -432,7 +435,7 @@ func (e *Enricher) translateContestEntry(ce contestEntry, gd *gamedata.GameData,
 	tempEvolutionName := ""
 	if ce.TempEvolution > 0 {
 		// Already reflected in fullName via buildFullName; expose raw name too.
-		tempEvolutionName = buildFullName(tr, nameKeys, pokemonName, formNormalised, ce.PokemonID, ce.TempEvolution)
+		tempEvolutionName = buildFullName(tr, nameKeys, pokemonName, formNormalised, ce.PokemonID, ce.TempEvolution, 0)
 	}
 	entry["tempEvolutionName"] = tempEvolutionName
 
@@ -469,7 +472,7 @@ func (e *Enricher) translateEncounterSlot(entries []gamedata.GruntEncounterEntry
 	result := make([]map[string]any, len(entries))
 	for i, enc := range entries {
 		nameInfo := make(map[string]any)
-		TranslateMonsterNames(nameInfo, gd, tr, enc.ID, enc.FormID, 0)
+		TranslateMonsterNames(nameInfo, gd, tr, enc.ID, enc.FormID, 0, 0)
 		result[i] = map[string]any{
 			"id":       enc.ID,
 			"formId":   enc.FormID,

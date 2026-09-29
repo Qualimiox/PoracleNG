@@ -111,7 +111,7 @@ func (n *Nominatim) Reverse(lat, lon float64, language string) (*Address, error)
 
 	var result nominatimReverseResult
 	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("nominatim: unmarshal: %w", err)
+		return nil, fmt.Errorf("nominatim: unmarshal reverse response (%s): %w", bodySnippet(body), err)
 	}
 	if result.Error != "" {
 		return nil, fmt.Errorf("nominatim: %s", result.Error)
@@ -183,7 +183,7 @@ func (n *Nominatim) Forward(query string) ([]ForwardResult, error) {
 
 	var results []nominatimForwardResult
 	if err := json.Unmarshal(body, &results); err != nil {
-		return nil, fmt.Errorf("nominatim: unmarshal: %w", err)
+		return nil, fmt.Errorf("nominatim: unmarshal search response (%s): %w", bodySnippet(body), err)
 	}
 
 	out := make([]ForwardResult, 0, len(results))
@@ -192,10 +192,15 @@ func (n *Nominatim) Forward(query string) ([]ForwardResult, error) {
 		lon, _ := strconv.ParseFloat(r.Lon, 64)
 		city := firstNonEmpty(r.Address.City, r.Address.Town, r.Address.Village, r.Address.Hamlet)
 		out = append(out, ForwardResult{
-			Latitude:  lat,
-			Longitude: lon,
-			City:      city,
-			Country:   r.Address.Country,
+			Latitude:     lat,
+			Longitude:    lon,
+			DisplayName:  r.DisplayName,
+			StreetNumber: r.Address.HouseNumber,
+			StreetName:   r.Address.Road,
+			City:         city,
+			State:        r.Address.State,
+			Zipcode:      r.Address.Postcode,
+			Country:      r.Address.Country,
 		})
 	}
 	return out, nil

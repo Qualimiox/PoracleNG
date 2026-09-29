@@ -301,13 +301,34 @@ func TestArgMatchLureType(t *testing.T) {
 	params := []ParamDef{{Type: ParamLureType}}
 
 	result := am.Match([]string{"glacial"}, params, "en")
-	if result.LureType != 502 {
-		t.Errorf("lure = %d, want 502", result.LureType)
+	if len(result.LureTypes) != 1 || result.LureTypes[0] != 502 {
+		t.Errorf("lure = %v, want [502]", result.LureTypes)
 	}
 
 	result = am.Match([]string{"mossy"}, params, "en")
-	if result.LureType != 503 {
-		t.Errorf("lure = %d, want 503", result.LureType)
+	if len(result.LureTypes) != 1 || result.LureTypes[0] != 503 {
+		t.Errorf("lure = %v, want [503]", result.LureTypes)
+	}
+
+	// "normal" is the plain Lure Module (501), not the 0 "any" sentinel.
+	result = am.Match([]string{"normal"}, params, "en")
+	if len(result.LureTypes) != 1 || result.LureTypes[0] != 501 {
+		t.Errorf("lure = %v, want [501]", result.LureTypes)
+	}
+
+	// Multiple lure names in one command all collect.
+	result = am.Match([]string{"normal", "glacial", "mossy", "magnetic", "sparkly"}, params, "en")
+	want := []int{501, 502, 503, 504, 506}
+	if len(result.LureTypes) != len(want) {
+		t.Fatalf("lure = %v, want %v", result.LureTypes, want)
+	}
+	for i, id := range want {
+		if result.LureTypes[i] != id {
+			t.Errorf("lure[%d] = %d, want %d", i, result.LureTypes[i], id)
+		}
+	}
+	if len(result.Unrecognized) != 0 {
+		t.Errorf("unrecognized = %v, want none", result.Unrecognized)
 	}
 }
 
@@ -687,4 +708,153 @@ func equalStringSlices(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// newAreaLocationTestMatcher extends the standard test matcher with
+// arg.prefix.area and arg.prefix.location translation keys.
+func newAreaLocationTestMatcher() *ArgMatcher {
+	bundle := i18n.NewBundle()
+	bundle.AddTranslator(i18n.NewTranslator("en", map[string]string{
+		"arg.prefix.area":     "area",
+		"arg.prefix.location": "location",
+		"arg.prefix.template": "template",
+	}))
+	return NewArgMatcher(bundle, &gamedata.GameData{Util: &gamedata.UtilData{}}, nil, []string{"en"})
+}
+
+func TestArgMatch_AreaMultiple(t *testing.T) {
+	am := newAreaLocationTestMatcher()
+	args := []string{"area:berlin", "area:munich,hamburg", "area:Frankfurt"}
+	parsed := am.Match(args, []ParamDef{
+		{Type: ParamPrefixStringList, Key: "arg.prefix.area"},
+	}, "en")
+	got := parsed.StringLists["area"]
+	want := []string{"berlin", "munich", "hamburg", "frankfurt"} // lowercased + comma-split
+	if !equalStringSlices(got, want) {
+		t.Fatalf("area list: got %v, want %v", got, want)
+	}
+}
+
+func TestArgMatch_LocationSingle(t *testing.T) {
+	am := newAreaLocationTestMatcher()
+	args := []string{"location:Home"}
+	parsed := am.Match(args, []ParamDef{
+		{Type: ParamPrefixString, Key: "arg.prefix.location"},
+	}, "en")
+	if parsed.Strings["location"] != "Home" {
+		t.Fatalf("location: got %q", parsed.Strings["location"])
+	}
+}
+
+func newMeganiumMatcher() *ArgMatcher {
+	bundle := i18n.NewBundle()
+	bundle.AddTranslator(i18n.NewTranslator("en", map[string]string{
+		"arg.prefix.mega": "mega",
+		"arg.mega":        "mega",
+		"poke_25":         "Pikachu",
+		"poke_154":        "Meganium",
+	}))
+	gd := &gamedata.GameData{
+		Monsters: map[gamedata.MonsterKey]*gamedata.Monster{
+			{ID: 25, Form: 0}:  {PokemonID: 25},
+			{ID: 154, Form: 0}: {PokemonID: 154},
+		},
+	}
+	resolver := NewPokemonResolver(gd, bundle, []string{"en"}, nil)
+	return NewArgMatcher(bundle, gd, resolver, []string{"en"})
+}
+
+// A string-prefix (here `mega`) must NOT swallow a token that is a known
+// pokemon. `meganium` (154) was matched as mega+"nium" before the fix.
+func TestPrefixDoesNotSwallowKnownPokemon(t *testing.T) {
+	am := newMeganiumMatcher()
+	params := []ParamDef{
+		{Type: ParamPrefixString, Key: "arg.prefix.mega"},
+		{Type: ParamKeyword, Key: "arg.mega"},
+		{Type: ParamPokemonName},
+	}
+
+	t.Run("meganium_resolves_as_pokemon", func(t *testing.T) {
+		p := am.Match([]string{"meganium"}, params, "en")
+		if p.Strings["mega"] != "" {
+			t.Fatalf("meganium wrongly consumed as mega prefix (val=%q)", p.Strings["mega"])
+		}
+		if len(p.Pokemon) != 1 || p.Pokemon[0].PokemonID != 154 {
+			t.Fatalf("meganium should resolve to pokemon 154; got %+v", p.Pokemon)
+		}
+	})
+
+	t.Run("mega_colon_x_still_works", func(t *testing.T) {
+		p := am.Match([]string{"mega:x"}, params, "en")
+		if p.Strings["mega"] != "x" {
+			t.Fatalf("mega:x should set mega=x; got %q", p.Strings["mega"])
+		}
+	})
+
+	t.Run("bare_mega_keyword_still_works", func(t *testing.T) {
+		p := am.Match([]string{"mega"}, params, "en")
+		if !p.HasKeyword("arg.mega") {
+			t.Fatalf("bare mega should set the arg.mega keyword")
+		}
+	})
+}
+
+// A coordinate pair typed with spaces around the comma is the natural
+// form (and what Google Maps copies). All three spacings must reach
+// tryLatLon as one token.
+func TestArgMatchLatLonWithSpaces(t *testing.T) {
+	am := newTestArgMatcher()
+	params := []ParamDef{{Type: ParamLatLon}}
+
+	cases := []struct {
+		name   string
+		tokens []string
+	}{
+		{"no space", []string{"40.738707,-73.997920"}},
+		{"space after comma", []string{"40.738707,", "-73.997920"}},
+		{"spaces both sides", []string{"40.738707", ",", "-73.997920"}},
+		{"space before comma", []string{"40.738707", ",-73.997920"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := am.Match(tc.tokens, params, "en")
+			if result.Coords == nil {
+				t.Fatalf("Coords not parsed from %q (unrecognized: %v)", tc.tokens, result.Unrecognized)
+			}
+			if result.Coords.Lat != 40.738707 || result.Coords.Lon != -73.997920 {
+				t.Errorf("Coords = %v, want 40.738707,-73.997920", *result.Coords)
+			}
+			if len(result.Unrecognized) != 0 {
+				t.Errorf("unrecognized = %v, want none", result.Unrecognized)
+			}
+		})
+	}
+}
+
+// Only genuine coordinate pairs are joined — adjacent tokens that don't
+// concatenate into a valid lat,lon must be left alone.
+func TestArgMatchLatLonDoesNotMergeUnrelatedTokens(t *testing.T) {
+	am := newTestArgMatcher()
+	params := []ParamDef{{Type: ParamLatLon}}
+
+	result := am.Match([]string{"51.28,1.08", "2.0"}, params, "en")
+	if result.Coords == nil || result.Coords.Lat != 51.28 || result.Coords.Lon != 1.08 {
+		t.Fatalf("Coords = %v, want 51.28,1.08", result.Coords)
+	}
+	if len(result.Unrecognized) != 1 || result.Unrecognized[0] != "2.0" {
+		t.Errorf("unrecognized = %v, want [2.0] left intact", result.Unrecognized)
+	}
+}
+
+// The collapse is scoped to commands declaring ParamLatLon: a command
+// without it (e.g. !track) must see its tokens exactly as before, so
+// "!track 25, 26" is unaffected.
+func TestArgMatchLatLonCollapseScopedToLatLonCommands(t *testing.T) {
+	am := newTestArgMatcher()
+	params := []ParamDef{{Type: ParamKeyword, Key: "arg.clean"}}
+
+	result := am.Match([]string{"25,", "26"}, params, "en")
+	if len(result.Unrecognized) != 2 {
+		t.Fatalf("unrecognized = %v, want both tokens unmerged", result.Unrecognized)
+	}
 }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/pokemon/poracleng/processor/internal/db"
+	"github.com/pokemon/poracleng/processor/internal/gamedata"
 	"github.com/pokemon/poracleng/processor/internal/i18n"
 )
 
@@ -52,6 +53,7 @@ func (g *Generator) RaidRowText(tr *i18n.Translator, raid *db.RaidTracking) stri
 		}
 
 		s += " " + rsvp
+		s = appendOverride(tr, s, raid.OverrideLocationLabel, raid.OverrideAreas)
 		return s
 	}
 
@@ -59,6 +61,22 @@ func (g *Generator) RaidRowText(tr *i18n.Translator, raid *db.RaidTracking) stri
 	s := fmt.Sprintf("**%s**", name)
 	if formName != "" {
 		s += " " + tr.Tf("tracking.form_fmt", formName)
+	}
+
+	// Costume: 9000 (wildcard) omitted; 0 = "no costume"; N>0 = translated name
+	// (masterfile-name fallback when the gamelocale key is missing).
+	if raid.Costume != 9000 {
+		costumeName := tr.T("msg.no_costume")
+		if raid.Costume != 0 {
+			key := gamedata.CostumeTranslationKey(raid.Costume)
+			costumeName = tr.T(key)
+			if costumeName == key && g.GD != nil {
+				if info, ok := g.GD.Costumes[raid.Costume]; ok && info.Name != "" {
+					costumeName = info.Name
+				}
+			}
+		}
+		s += " | " + costumeName
 	}
 
 	if raid.Distance != 0 {
@@ -81,6 +99,7 @@ func (g *Generator) RaidRowText(tr *i18n.Translator, raid *db.RaidTracking) stri
 	}
 
 	s += " " + rsvp
+	s = appendOverride(tr, s, raid.OverrideLocationLabel, raid.OverrideAreas)
 	return s
 }
 
@@ -123,5 +142,6 @@ func (g *Generator) EggRowText(tr *i18n.Translator, egg *db.EggTracking) string 
 	}
 
 	s += " " + rsvp
+	s = appendOverride(tr, s, egg.OverrideLocationLabel, egg.OverrideAreas)
 	return s
 }

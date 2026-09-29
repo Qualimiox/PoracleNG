@@ -63,6 +63,38 @@ func TestCalculateBasic(t *testing.T) {
 	}
 }
 
+// TestCalculate_EvolutionDataIncludesMega ensures cross-species evolution
+// direct tracking captures mega/temporary-evolution entries (tagged with their
+// Evolution), so a `mega` rule on the evolved species can fire on a
+// pre-evolution. A Charmander (4) spawns; its great-league PVP lists the evolved
+// Charizard (6) as base (evo 0) and Mega X (evo 2).
+func TestCalculate_EvolutionDataIncludesMega(t *testing.T) {
+	pokemon := &webhook.PokemonWebhook{
+		PokemonID: 4,
+		Form:      0,
+		PVP: map[string][]webhook.PVPRankEntry{
+			"great": {
+				{Pokemon: 6, Form: 178, Rank: 50, CP: 1500, Cap: 50, Capped: true, Evolution: 0}, // base Charizard
+				{Pokemon: 6, Form: 178, Rank: 3, CP: 1480, Cap: 50, Capped: true, Evolution: 2},  // Mega Charizard X
+			},
+		},
+	}
+	cfg := &Config{LevelCaps: []int{50}, PVPFilterMaxRank: 100, PVPEvolutionDirectTracking: true}
+	result := Calculate(pokemon, cfg)
+
+	evo := result.EvolutionData[6][1500]
+	got := map[int]int{} // evolution -> rank
+	for _, r := range evo {
+		got[r.Evolution] = r.Rank
+	}
+	if got[0] != 50 {
+		t.Errorf("expected base Charizard (evo 0) rank 50 in EvolutionData[6]; got %#v", got)
+	}
+	if got[2] != 3 {
+		t.Errorf("expected Mega Charizard X (evo 2) rank 3 in EvolutionData[6]; got %#v", got)
+	}
+}
+
 func TestCalculateMultipleCaps(t *testing.T) {
 	pokemon := &webhook.PokemonWebhook{
 		PokemonID: 25,
@@ -99,31 +131,42 @@ func TestCalculateMultipleCaps(t *testing.T) {
 }
 
 func TestCalculateNoMegaFilter(t *testing.T) {
+	// Mega entries are no longer dropped; both base and mega appear as separate evolution-tagged entries.
 	pokemon := &webhook.PokemonWebhook{
 		PokemonID: 25,
 		Form:      0,
 		PVP: map[string][]webhook.PVPRankEntry{
 			"great": {
-				{Pokemon: 25, Form: 0, Rank: 10, CP: 1490, Cap: 50, Evolution: 0},
-				{Pokemon: 10025, Form: 0, Rank: 5, CP: 1480, Cap: 50, Evolution: 1}, // Mega
+				{Pokemon: 25, Form: 0, Rank: 10, CP: 1490, Cap: 50, Capped: true, Evolution: 0},
+				{Pokemon: 25, Form: 0, Rank: 5, CP: 1480, Cap: 50, Capped: true, Evolution: 1}, // Mega
 			},
 		},
 	}
 
 	cfg := &Config{
-		LevelCaps:            []int{50},
-		PVPFilterMaxRank:     100,
-		IncludeMegaEvolution: false,
+		LevelCaps:        []int{50},
+		PVPFilterMaxRank: 100,
 	}
 
 	result := Calculate(pokemon, cfg)
 	bestRanks := result.BestRank[1500]
 
-	// Should only have rank 10 (mega filtered out)
+	// Both base (evolution=0, rank=10) and mega (evolution=1, rank=5) should appear.
+	foundBase := false
+	foundMega := false
 	for _, r := range bestRanks {
-		if r.Rank == 5 {
-			t.Error("Expected mega evolution to be filtered out")
+		if r.Evolution == 0 && r.Rank == 10 {
+			foundBase = true
 		}
+		if r.Evolution == 1 && r.Rank == 5 {
+			foundMega = true
+		}
+	}
+	if !foundBase {
+		t.Errorf("Expected base entry (evolution=0, rank=10) in best ranks, got %+v", bestRanks)
+	}
+	if !foundMega {
+		t.Errorf("Expected mega entry (evolution=1, rank=5) in best ranks, got %+v", bestRanks)
 	}
 }
 
@@ -225,6 +268,29 @@ func TestCalculateEvoCapsExplicit(t *testing.T) {
 	}
 	if len(leagueData[0].Caps) != 1 || leagueData[0].Caps[0] != 50 {
 		t.Errorf("Expected caps=[50] for explicit cap 50, got %v", leagueData[0].Caps)
+	}
+}
+
+func TestCalculate_KeepsMegaEntriesTaggedByEvolution(t *testing.T) {
+	pokemon := &webhook.PokemonWebhook{
+		PokemonID: 6,
+		PVP: map[string][]webhook.PVPRankEntry{
+			"great": {
+				{Pokemon: 6, Form: 178, Rank: 10, CP: 1490, Cap: 50, Capped: true, Evolution: 0},
+				{Pokemon: 6, Form: 178, Rank: 5, CP: 1480, Cap: 50, Capped: true, Evolution: 2},
+				{Pokemon: 6, Form: 178, Rank: 3, CP: 1470, Cap: 50, Capped: true, Evolution: 3},
+			},
+		},
+	}
+	cfg := &Config{LevelCaps: []int{50}}
+	result := Calculate(pokemon, cfg)
+
+	got := map[int]int{} // evolution -> rank
+	for _, lr := range result.BestRank[1500] {
+		got[lr.Evolution] = lr.Rank
+	}
+	if got[0] != 10 || got[2] != 5 || got[3] != 3 {
+		t.Fatalf("expected base=10, megaX=5, megaY=3 tagged by evolution; got %#v", got)
 	}
 }
 

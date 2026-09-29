@@ -57,6 +57,8 @@ var synonyms = contextSynonyms{
 		"shiny":       "shiny",
 		"shinies":     "shiny",
 		"stardust":    "stardust",
+		"pokecoins":   "pokecoins",
+		"pokecoin":    "pokecoins",
 		"energy":      "energy",
 		"mega energy": "energy",
 		"candy":       "candy",
@@ -151,7 +153,7 @@ var poracleFilterRe = regexp.MustCompile(
 		`|new` +
 		`|ex` +
 		`|shiny` +
-		`|stardust|energy|candy` +
+		`|stardust|pokecoins|energy|candy` +
 		`)$`,
 )
 
@@ -460,13 +462,7 @@ func matchPVP(tokens []string, intent string, result *FilterResult) {
 		if !strings.Contains(phrase, " ") {
 			continue
 		}
-		for {
-			if allTokensConsumed(tokens, phrase, result) {
-				break
-			}
-			if !strings.Contains(currentJoined(tokens, result), phrase) {
-				break
-			}
+		for !allTokensConsumed(tokens, phrase, result) && strings.Contains(currentJoined(tokens, result), phrase) {
 			addLeague(lg)
 			markMultiWordConsumed(tokens, phrase, result)
 		}

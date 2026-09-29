@@ -106,7 +106,7 @@ func (ps *ProcessorService) ProcessQuest(raw json.RawMessage) error {
 
 			l.Infof("Quest at %s areas(%s) and %d humans cared", quest.Name, areaNames(matchedAreas), len(matched))
 
-			mode := ps.tileMode("quest", matched)
+			mode := ps.tileMode("quest", matched, quest.PokestopID)
 			enrichmentData, tilePending := ps.enricher.Quest(quest.Latitude, quest.Longitude, quest.PokestopID, quest.URL, rewards, mode)
 
 			// Compute per-language translated enrichment
@@ -153,15 +153,15 @@ func buildQuestRewardsKey(withAR bool, rewards []webhook.QuestReward) string {
 		key.WriteString("std:")
 	}
 	for _, r := range rewards {
-		key.WriteString(fmt.Sprintf("%d:", r.Type))
+		fmt.Fprintf(&key, "%d:", r.Type)
 		if info, ok := r.Info["pokemon_id"]; ok {
-			key.WriteString(fmt.Sprintf("p%v", info))
+			fmt.Fprintf(&key, "p%v", info)
 		}
 		if info, ok := r.Info["item_id"]; ok {
-			key.WriteString(fmt.Sprintf("i%v", info))
+			fmt.Fprintf(&key, "i%v", info)
 		}
 		if info, ok := r.Info["amount"]; ok {
-			key.WriteString(fmt.Sprintf("a%v", info))
+			fmt.Fprintf(&key, "a%v", info)
 		}
 		key.WriteString(";")
 	}
@@ -236,6 +236,8 @@ func (ps *ProcessorService) bufferQuestMatches(
 		case 2: // item
 			reward = rewards[0].ItemID
 		case 3: // stardust → amount
+			reward = rewards[0].Amount
+		case 8: // pokecoins → amount
 			reward = rewards[0].Amount
 		}
 	}

@@ -74,7 +74,10 @@ func NewDispatcher(cfg Config) *Dispatcher {
 	}
 	d.autocompleteRegistry.Register("tracking", listers.ListTracking)
 	d.autocompleteRegistry.Register("areas", listers.ListAreas)
+	d.autocompleteRegistry.Register("areas_available", listers.ListAvailableAreas)
+	d.autocompleteRegistry.Register("areas_addable", listers.ListAddableAreas)
 	d.autocompleteRegistry.Register("profiles", listers.ListProfiles)
+	d.autocompleteRegistry.Register("locations", listers.ListUserLocations)
 	return d
 }
 
@@ -211,21 +214,14 @@ func (d *Dispatcher) HandleCommand(s *discordgo.Session, ic *discordgo.Interacti
 		return
 	}
 
-	// 7. Map slash options to text-command tokens. /location has a
-	// non-standard mapper signature (it needs BotDeps for the Forward
-	// geocoder call) and is therefore not in the shared registry; we
-	// dispatch it directly.
+	// 7. Map slash options to text-command tokens.
 	var tokens []string
-	if canon == "location" {
-		tokens, err = mappers.Location(ic.ApplicationCommandData().Options, d.deps)
-	} else {
-		mapperFn := mappers.Lookup(canon)
-		if mapperFn == nil {
-			d.respondError(s, ic, "🛑 Command not implemented.")
-			return
-		}
-		tokens, err = mapperFn(ic.ApplicationCommandData().Options)
+	mapperFn := mappers.Lookup(canon)
+	if mapperFn == nil {
+		d.respondError(s, ic, "🛑 Command not implemented.")
+		return
 	}
+	tokens, err = mapperFn(ic.ApplicationCommandData().Options)
 	if err != nil {
 		d.respondError(s, ic, formatMapperError(err, ctx.Language, d.bundle))
 		return
@@ -237,7 +233,7 @@ func (d *Dispatcher) HandleCommand(s *discordgo.Session, ic *discordgo.Interacti
 	// id:N"). The mapper emits the right token grammar for each branch.
 	runKey := cmdKey
 	if canon == "untrack" {
-		if sub := findUntrackSubtype(ic); sub != "" && sub != "pokemon" {
+		if sub := subCommandName(ic); sub != "" && sub != "pokemon" {
 			runKey = "cmd." + sub
 		}
 	}
@@ -344,13 +340,56 @@ func (d *Dispatcher) routeAutocomplete(cmd, opt, focused, userLang string, ic *d
 		return autocomplete.Pokemon(context.Background(), d.deps, focused, userLang)
 	case opt == "iv":
 		return autocomplete.IVRange(focused)
+	// /profile settime and /summary … settime share the `times` option and
+	// the same settime grammar, so one route covers both.
+	case opt == "times":
+		return autocomplete.TimeSpec(focused, d.autocompleteTranslator(userLang))
 	case opt == "boss" && cmd == "raid":
 		return autocomplete.RaidBoss(context.Background(), d.deps, focused, userLang)
+	// /raid costume is a flat, non-species-scoped list, same shape as
+	// /track costume. On empty focused with a resolvable sibling `boss`
+	// (raid has no `pokemon` option), it boosts that boss's recently-seen
+	// raid costumes to the top.
+	case opt == "costume" && cmd == "raid":
+		base := autocomplete.Costume(context.Background(), d.deps, focused, userLang)
+		if focused == "" && d.deps != nil && d.deps.RecentActivity != nil {
+			if pid := autocomplete.ResolvePokemonID(d.deps, siblingOptionString(ic, "boss")); pid > 0 {
+				base = autocomplete.PrependRecentCostumes(base, d.deps, d.deps.RecentActivity.RecentRaidCostumes(pid), userLang)
+			}
+		}
+		return base
+	// /raid form cascades from the sibling `boss` option (raid has no
+	// `pokemon` option), same shape as /track form. On empty focused with a
+	// resolvable boss, it boosts that boss's recently-seen raid forms to the
+	// top via the raid-specific RecentRaidForms bucket (not the spawn
+	// RecentForms bucket).
+	case opt == "form" && cmd == "raid":
+		base := autocomplete.Form(context.Background(), d.deps, siblingOptionString(ic, "boss"), focused, userLang)
+		if focused == "" && d.deps != nil && d.deps.RecentActivity != nil {
+			if pid := autocomplete.ResolvePokemonID(d.deps, siblingOptionString(ic, "boss")); pid > 0 {
+				base = autocomplete.PrependRecentForms(base, d.deps, d.deps.RecentActivity.RecentRaidForms(pid), userLang)
+			}
+		}
+		return base
 	case opt == "template":
 		return autocomplete.Template(context.Background(), d.deps, focused, dtsTypeFor(cmd), "discord", userLang)
+	// /help topic — the installed "help" DTS entry ids. The option has
+	// always declared Autocomplete:true, but without a route here Discord
+	// got an empty response and showed "no options" forever.
+	case opt == "topic" && cmd == "help":
+		return autocomplete.HelpTopic(d.deps, focused, "discord", d.isAdmin(interactionUserID(ic)))
 	case opt == "tracking" && cmd == "untrack":
-		subtype := findUntrackSubtype(ic)
+		subtype := subCommandName(ic)
 		return d.userstateAutocomplete(ic, "tracking", subtype, focused)
+	// /area add offers what the user could still add (available minus
+	// already-selected); /area remove offers what they currently have.
+	// Both options hold a comma-separated list, so picks compose.
+	case opt == "area" && cmd == "area":
+		lister := "areas"
+		if subCommandName(ic) == "add" {
+			lister = "areas_addable"
+		}
+		return d.userstateAutocompleteMulti(ic, lister, focused)
 	case opt == "area":
 		return d.userstateAutocomplete(ic, "areas", "", focused)
 	case opt == "name" && cmd == "profile":
@@ -360,6 +399,11 @@ func (d *Dispatcher) routeAutocomplete(cmd, opt, focused, userLang string, ic *d
 	// (copyto) selects the option name (profile), not a different list.
 	case opt == "profile" && cmd == "profile":
 		return d.userstateAutocomplete(ic, "profiles", "", focused)
+	// /location show name and /location remove name — autocomplete from
+	// the user's saved named locations. Both sub-commands use the same
+	// option name ("name"), so a single (opt, cmd) pair covers both.
+	case opt == "name" && cmd == "location":
+		return d.userstateAutocomplete(ic, "locations", "", focused)
 	// /quest reward-type options. Item is its own translated lookup;
 	// candy and mega_energy are pokemon-keyed (the reward IS for a
 	// specific species), so they reuse the pokemon autocomplete.
@@ -398,12 +442,56 @@ func (d *Dispatcher) routeAutocomplete(cmd, opt, focused, userLang string, ic *d
 	case opt == "type" && cmd == "incident":
 		return autocomplete.IncidentType(context.Background(), d.deps, focused, userLang)
 	// /track form cascades from the user's currently-selected pokemon
-	// option in the same interaction.
+	// option in the same interaction. On empty focused, also boosts the
+	// forms recently seen on that pokemon (RecentActivity.RecentForms) to
+	// the top of the list.
 	case opt == "form" && cmd == "track":
 		pokemonValue := siblingOptionString(ic, "pokemon")
-		return autocomplete.Form(context.Background(), d.deps, pokemonValue, focused, userLang)
+		base := autocomplete.Form(context.Background(), d.deps, pokemonValue, focused, userLang)
+		if focused == "" && d.deps != nil && d.deps.RecentActivity != nil {
+			if pid := autocomplete.ResolvePokemonID(d.deps, pokemonValue); pid > 0 {
+				base = autocomplete.PrependRecentForms(base, d.deps, d.deps.RecentActivity.RecentForms(pid), userLang)
+			}
+		}
+		return base
+	// /track costume is a flat, non-species-scoped list (unlike form), so
+	// it doesn't cascade from the selected pokemon option for filtering.
+	// On empty focused with a resolvable sibling pokemon, it does
+	// optionally boost that pokemon's recently-seen costumes to the top.
+	case opt == "costume" && cmd == "track":
+		base := autocomplete.Costume(context.Background(), d.deps, focused, userLang)
+		if focused == "" && d.deps != nil && d.deps.RecentActivity != nil {
+			if pid := autocomplete.ResolvePokemonID(d.deps, siblingOptionString(ic, "pokemon")); pid > 0 {
+				base = autocomplete.PrependRecentCostumes(base, d.deps, d.deps.RecentActivity.RecentCostumes(pid), userLang)
+			}
+		}
+		return base
+	// Tracker location: autocomplete from the user's saved named locations.
+	// Used by the `location` option on all 10 tracker commands so a user can
+	// pick a saved location by name rather than typing coordinates.
+	case opt == "location" && isTrackerCommand(cmd):
+		return d.userstateAutocomplete(ic, "locations", "", focused)
+	// Tracker areas: autocomplete from every area available to the user,
+	// not just the ones they have selected — `areas:` overrides the rule's
+	// areas outright, and parseOverride validates it against the available
+	// set. The option holds a comma-separated list, so the multi variant
+	// composes each pick onto what the user has already typed.
+	case opt == "areas" && isTrackerCommand(cmd):
+		return d.userstateAutocompleteMulti(ic, "areas_available", focused)
 	}
 	return nil
+}
+
+// isTrackerCommand reports whether cmd is one of the 10 tracker command
+// short names. Used to scope autocomplete for the shared `location` and
+// `areas` options that appear on every tracker command.
+func isTrackerCommand(cmd string) bool {
+	switch cmd {
+	case "track", "raid", "egg", "quest", "invasion", "incident",
+		"lure", "nest", "maxbattle", "gym", "fort":
+		return true
+	}
+	return false
 }
 
 // siblingOptionString returns the StringValue of the given top-level
@@ -432,19 +520,51 @@ func siblingOptionString(ic *discordgo.InteractionCreate, name string) string {
 // the lister errors — autocomplete shouldn't surface infrastructure errors
 // to the end user, so we degrade silently to "no suggestions".
 func (d *Dispatcher) userstateAutocomplete(ic *discordgo.InteractionCreate, listerName, subtype, focused string) []*discordgo.ApplicationCommandOptionChoice {
-	if d.autocompleteRegistry == nil {
-		return nil
-	}
-	lister := d.autocompleteRegistry.Lookup(listerName)
-	if lister == nil {
-		return nil
-	}
-	userID := interactionUserID(ic)
-	out, err := lister(context.Background(), d.deps, userID, autocomplete.UserStateHint{Subtype: subtype, Focused: focused})
-	if err != nil {
+	out, ok := d.listerChoices(ic, listerName, subtype, focused)
+	if !ok {
 		return nil
 	}
 	return autocomplete.FilterAndCap(out, focused)
+}
+
+// userstateAutocompleteMulti is userstateAutocomplete for options that
+// hold a comma-separated list (the tracker `areas:` option). The lister
+// still produces one Choice per candidate; FilterAndCapMulti composes them
+// onto whatever the user has already typed so each pick appends.
+//
+// The lister sees only the segment being typed, not the whole field, so
+// any lister that filters on hint.Focused behaves the same either way.
+func (d *Dispatcher) userstateAutocompleteMulti(ic *discordgo.InteractionCreate, listerName, focused string) []*discordgo.ApplicationCommandOptionChoice {
+	_, typing := autocomplete.SplitLastSegment(focused)
+	out, ok := d.listerChoices(ic, listerName, "", typing)
+	if !ok {
+		return nil
+	}
+	return autocomplete.FilterAndCapMulti(out, focused)
+}
+
+// listerChoices resolves a lister by name and runs it for the invoking
+// user. ok is false when the registry has no such lister or the lister
+// errored — autocomplete shouldn't surface infrastructure errors to the
+// end user, so callers degrade silently to "no suggestions".
+func (d *Dispatcher) listerChoices(ic *discordgo.InteractionCreate, listerName, subtype, focused string) ([]autocomplete.Choice, bool) {
+	if d.autocompleteRegistry == nil {
+		return nil, false
+	}
+	lister := d.autocompleteRegistry.Lookup(listerName)
+	if lister == nil {
+		return nil, false
+	}
+	userID := interactionUserID(ic)
+	out, err := lister(context.Background(), d.deps, userID, autocomplete.UserStateHint{
+		Subtype: subtype,
+		Focused: focused,
+		IsAdmin: d.isAdmin(userID),
+	})
+	if err != nil {
+		return nil, false
+	}
+	return out, true
 }
 
 // focusedOption returns the option flagged Focused=true. Walks into
@@ -489,11 +609,14 @@ func focusedStringValue(opt *discordgo.ApplicationCommandInteractionDataOption) 
 	return ""
 }
 
-// findUntrackSubtype walks the top-level interaction options for an
-// /untrack invocation and returns the chosen sub-command's name (which IS
-// the tracking subtype: "raid", "egg", ...). Returns "" when no
-// sub-command option is present — caller treats that as "no subtype hint".
-func findUntrackSubtype(ic *discordgo.InteractionCreate) string {
+// subCommandName walks the top-level interaction options and returns the
+// chosen sub-command's name, or "" when the command has no sub-command
+// layer (callers treat that as "no hint"). For /untrack the sub-command
+// name IS the tracking subtype ("raid", "egg", ...); for /area it is the
+// verb ("add", "remove", ...). Discord sends the canonical (default) name
+// here even when the user sees a localized one, so callers can compare
+// against the English names used in the definitions.
+func subCommandName(ic *discordgo.InteractionCreate) string {
 	if ic == nil || ic.Interaction == nil {
 		return ""
 	}
@@ -515,6 +638,16 @@ func findUntrackSubtype(ic *discordgo.InteractionCreate) string {
 //
 // The DTS types come from fallbacks/dts.json: monster, raid, egg, quest,
 // invasion, lure, nest, gym, fort-update, maxbattle.
+// autocompleteTranslator resolves a translator for autocomplete suggestions,
+// returning nil when no bundle is wired (tests) so callers fall back to their
+// English defaults rather than panicking.
+func (d *Dispatcher) autocompleteTranslator(lang string) *i18n.Translator {
+	if d == nil || d.bundle == nil {
+		return nil
+	}
+	return d.bundle.For(lang)
+}
+
 func dtsTypeFor(cmd string) string {
 	switch cmd {
 	case "track":
@@ -744,7 +877,7 @@ func appendSlashOptions(sb *strings.Builder, opts []*discordgo.ApplicationComman
 		default:
 			sb.WriteString(opt.Name)
 			sb.WriteByte(':')
-			sb.WriteString(fmt.Sprintf("%v", opt.Value))
+			fmt.Fprintf(sb, "%v", opt.Value)
 		}
 	}
 }

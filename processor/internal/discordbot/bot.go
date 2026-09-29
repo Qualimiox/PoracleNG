@@ -753,16 +753,22 @@ func (b *Bot) handleDiscordCommand(s *discordgo.Session, m *discordgo.MessageCre
 }
 
 func (b *Bot) sendReplies(s *discordgo.Session, m *discordgo.MessageCreate, replies []bot.Reply) {
-	// Reference the original message so responses show as replies
-	ref := &discordgo.MessageReference{
-		MessageID: m.ID,
-		ChannelID: m.ChannelID,
-		GuildID:   m.GuildID,
+	// Reference the original message so responses show as replies.
+	// Synthetic messages (e.g. autocreate command runs) have no ID —
+	// nothing to react to or reference, and Discord rejects a
+	// message_reference with an empty message_id, so plain sends only.
+	var ref *discordgo.MessageReference
+	if m.ID != "" {
+		ref = &discordgo.MessageReference{
+			MessageID: m.ID,
+			ChannelID: m.ChannelID,
+			GuildID:   m.GuildID,
+		}
 	}
 
 	for _, reply := range replies {
 		// React
-		if reply.React != "" {
+		if reply.React != "" && m.ID != "" {
 			s.MessageReactionAdd(m.ChannelID, m.ID, reply.React)
 		}
 
@@ -808,7 +814,9 @@ func (b *Bot) sendReplies(s *discordgo.Session, m *discordgo.MessageCreate, repl
 				if i == 0 && msgRef != nil {
 					msgSend.Reference = msgRef
 				}
-				s.ChannelMessageSendComplex(targetChannel, msgSend)
+				if _, err := s.ChannelMessageSendComplex(targetChannel, msgSend); err != nil {
+					log.Warnf("discord bot: send reply: %v", err)
+				}
 			}
 		}
 
@@ -922,15 +930,15 @@ func (b *Bot) onThreadDelete(s *discordgo.Session, ev *discordgo.ThreadDelete) {
 	}
 	res, err := b.DB.Exec(
 		`UPDATE humans SET admin_disable = 1, disabled_date = NOW() WHERE id = ? AND type = 'discord:thread'`,
-		ev.Channel.ID)
+		ev.ID)
 	if err != nil {
-		log.Warnf("discord bot: disable deleted thread %s: %v", ev.Channel.ID, err)
+		log.Warnf("discord bot: disable deleted thread %s: %v", ev.ID, err)
 		return
 	}
 	if rows, _ := res.RowsAffected(); rows > 0 {
 		b.PostAdminNotice(fmt.Sprintf(
 			":wastebasket: Discord thread `%s` (`%s`) was deleted — auto-disabled the registered tracking row.",
-			ev.Channel.Name, ev.Channel.ID,
+			ev.Name, ev.ID,
 		))
 	}
 }

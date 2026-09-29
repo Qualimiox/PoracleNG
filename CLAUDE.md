@@ -64,7 +64,7 @@ processor/                      # Go binary
       trackingRaid.go, ...      # Per-type tracking endpoints (10 types)
     delivery/                   # Go-native message delivery (Discord REST, Telegram Bot API)
       dispatcher.go             # Top-level orchestrator: Dispatch, Start, Stop
-      queue.go                  # FairQueue with per-destination mutex, per-platform semaphores
+      queue.go                  # FairQueue with per-destination lanes (one drainer per destination), per-platform semaphores
       discord.go                # Discord REST sender: DM, channel, thread, webhook, image upload
       telegram.go               # Telegram REST sender: sticker, photo, text, venue, location
       ratelimit.go              # Per-route Discord rate limiting + global 50 req/sec token bucket
@@ -157,7 +157,8 @@ The handler creates a `matching.*Data` struct and calls the matcher. All matcher
    - Human exists, is enabled, not admin-disabled
    - Alert type not in `blocked_alerts`
    - Profile number matches
-   - Distance check (haversine) if distance > 0, else area overlap check
+   - Distance check (haversine) if distance > 0, else area overlap check. Location anchor resolution order: rule `override_location_label` → profile location → human default location.
+   - Area overlap check uses rule `override_areas` if set, else profile areas, else human default areas.
    - Strict area restriction (if configured)
 4. Returns `[]MatchedUser` with destination info (id, type, template, clean, ping, distance)
 
@@ -218,7 +219,7 @@ The processor renders DTS templates using `jfberry/raymond` (a fork of `mailgun/
 
 **Queue pressure**: When the render channel is >80% full, tile generation is skipped to reduce backpressure.
 
-**Shutdown ordering** (`ProcessorService.Close` in `cmd/processor/main.go`): webhook workers → render channel (close) → render workers (drain) → dispatcher (stop, which stops its queue and tracker) → static map (close) → duplicates → rate limiter → gym state save → geocoder (close).
+**Shutdown ordering** (`ProcessorService.Close` in `cmd/processor/main.go`): webhook workers → render channel (close) → render workers (drain) → dispatcher (stop, which stops its queue and tracker) → static map (close) → duplicates → weather tracker (stops the cell-eviction sweep) → rate limiter → gym state save → geocoder (close).
 
 ### 6. Message Delivery (Processor)
 
@@ -230,7 +231,7 @@ Delivery is handled via platform REST APIs (Discord API v10, Telegram Bot API).
 - Manages per-platform concurrency semaphores
 
 **FairQueue** (`delivery/queue.go`):
-- Per-destination `sync.Mutex` via `sync.Map` ensures message ordering per channel/user
+- Per-destination lanes (one drainer goroutine per destination, spawned on demand and reaped after idling) ensure message ordering per channel/user
 - Per-platform semaphores limit concurrent API calls
 - Edit-before-send: if a job has an edit key matching a tracked message, edits instead of sending new
 
@@ -254,6 +255,7 @@ Delivery is handled via platform REST APIs (Discord API v10, Telegram Bot API).
 - Global 50 req/sec token bucket
 - `Retry-After` parsing with Dexter's heuristic (>1000 → milliseconds)
 - Cleanup when map >1000 entries
+- **Applies to POST, PATCH (edit) AND DELETE (clean-deletion).** All three share the same 429 Retry-After backoff + header-driven limiter updates via `DiscordSender.doWithRetry` (Telegram: `doPostWithRetry`), and **all three go through the FairQueue** so they pass through the same per-destination lane (and `WaitForRateLimit`) before firing. Clean-deletion originates in the `MessageTracker`'s TTL-eviction callback, which — rather than spawning an unbounded goroutine per eviction (the original bug: a burst of expiring alerts across many channels fired concurrent DELETEs that 429'd each other into failure and left the messages behind) — calls `MessageTracker.cleanDelete`. That routes through the `cleanDeleteHook` the Dispatcher wires (`enqueueCleanDelete`), which enqueues a `Job{DeleteSentID}` onto the queue. `FairQueue.processJob` then handles delete jobs on the **same per-destination lane as sends** — that lane's single drainer goroutine serialises deletes with each other and with sends to that channel — calls `Sender.Delete`, and skips alert-limit accounting / tracking / snapshot. The enqueue is non-blocking + panic-guarded (a delete dropped on a full or shutting-down lane is NOT recovered on the next load — the message was already evicted from the tracker's ttlcache, so `Save()`, which only persists still-live entries, never writes it; only messages still tracked at shutdown are persisted and re-cleaned on next load). No queue wired (some tests) ⇒ `cleanDelete` falls back to the direct-Delete goroutine.
 
 **Message Tracker** (`delivery/tracker.go`):
 - TTL cache (`ttlcache/v3`) keyed by `target:messageID`
@@ -342,6 +344,10 @@ Role-loss handling is left to Discord: private-thread visibility inherits View C
 - `GET /health` — health check
 - `GET /metrics` — Prometheus metrics
 - `POST /` — webhook receiver from Golbat (no auth, Golbat doesn't authenticate)
+- `GET /openapi.json` — OpenAPI 3.1 spec
+- `GET /docs` — interactive API docs
+
+**huma surface (`/api/*` reads + features, and `/api/v2/*`)**: The `/api/*` read/reload/feature endpoints listed below and the entire `/api/v2/*` surface are served by [huma](https://github.com/danielgtaylor/huma) (mounted on gin via humagin, one instance), and appear in the OpenAPI 3.1 spec at `/openapi.json` / `/docs`. Error bodies on this surface are RFC 9457 `application/problem+json` (`status`, `title`, `detail`, `errors[]`) — replacing the old `{status:"error",message}` / `gin.H{"error":...}` bodies (status codes unchanged; a few manual-400s became validation-422s). `/health`, `/metrics`, pprof, and the webhook receiver `POST /` stay on plain gin by design.
 
 ## Command System
 
@@ -435,7 +441,7 @@ Bare `!track everything` with no meaningful filters (IV, CP, level, PVP, type, g
 - `!untrack id:45` or `!raid remove id:12` — remove a specific tracking rule by database UID (works for all tracking types)
 - `!untrack <type> [args]` — reroute to per-type remove handler (e.g. `!untrack raid id:12`, `!untrack egg level:5`, `!untrack invasion grunt:bug`); mirrors the `/untrack <subtype>` slash form. First token is matched against the canonical English type list (`raid`, `egg`, `quest`, `invasion`, `incident`, `lure`, `nest`, `gym`, `fort`, `maxbattle`); other tokens fall through to the existing pokemon-untrack path.
 - `!mute <scope> <value> [duration:1h]` / `!unmute <scope> <value>` — silence alerts for a gym, pokemon species, area, pokestop, or station for a time-bounded window. `!mute everything [duration:1h]` self-mutes the user across all alert types. Per-type aliases work too (`!raid mute id:X` ≡ `!mute raid id:X`). Mutes are listed by `!tracked`. See the "Mute Infrastructure" section for store + matcher integration.
-- `!poracle-admin <group> [subcommand] [args]` (also `!pa`) — administrative umbrella for live operations, admin-only. Groups: `slash` (slash-command lifecycle), `reload` (dts/geofence/state), `status` (health snapshot), `ratelimit` (inspect/reset alert limits), `summary` (summary buffer), `cache` (geocoder stats/clear), `maintenance` (pause/resume delivery), `emoji` (emoji config inspection), `reconcile` (Discord role sync), `config` (effective config dump), `warnings` (captured WARN/ERROR log buffer). See `docs/admin-commands/` for design and smoke-test checklist.
+- `!poracle-admin <group> [subcommand] [args]` (also `!pa`) — administrative umbrella for live operations, admin-only. Groups: `slash` (slash-command lifecycle, incl. `list` — registered commands as Discord `</name:id>` mentions), `reload` (dts/geofence/state), `status` (health snapshot), `ratelimit` (inspect/reset alert limits), `summary` (summary buffer), `cache` (geocoder stats/clear), `maintenance` (pause/resume delivery), `emoji` (emoji config inspection), `reconcile` (Discord role sync), `config` (effective config dump), `warnings` (captured WARN/ERROR log buffer). See `docs/admin-commands/` for design and smoke-test checklist.
 - `!poracle` — register/start
 - `!profile` — switch/create/delete profiles
 - `!area` — add/remove geofence areas
@@ -526,6 +532,10 @@ All API endpoints are accessed via the processor (port 3030). The processor hand
 | POST | `/api/humans/{id}/setLocation/{lat}/{lon}` | Update user location |
 | GET | `/api/humans/{id}/checkLocation/{lat}/{lon}` | Check if location is in allowed areas |
 | POST | `/api/humans/{id}/setAreas` | Set user's selected geofence areas |
+| GET | `/api/humans/{id}/locations` | List saved locations + default |
+| GET | `/api/humans/{id}/locations/{label}` | Show one saved location by label |
+| POST | `/api/humans/{id}/locations/add` | Create one or more saved locations |
+| POST | `/api/humans/{id}/locations/{label}/delete` | Delete a saved location (409 if referenced by a rule) |
 | POST | `/api/humans/{id}/switchProfile/{profile}` | Switch active profile |
 | GET | `/api/humans/{id}/roles` | List Discord roles across guilds |
 | POST | `/api/humans/{id}/roles/add/{roleId}` | Add a Discord role to a user |
@@ -538,10 +548,19 @@ All API endpoints are accessed via the processor (port 3030). The processor hand
 | DELETE | `/api/profiles/{id}/byProfileNo/{profile_no}` | Delete profile |
 | GET | `/api/snapshots/{messageID}?target={id}` | Inspect a delivered-message snapshot (admin diagnostics; 503 if `[snapshots] enabled = false`) |
 | GET | `/api/dts/actions` | List registered button actions + their scopes/params (drives the config editor's button UI) |
-| GET | `/health` | Health check; returns `{status, version, capabilities}` where `capabilities` is a static feature map (`buttons`, `snapshots`, `autocreate`, `tomlDts`, `buttonResponseObject`) so clients can do explicit feature detection without probing endpoints |
+| GET | `/health` | Health check; returns `{status, version, capabilities}` where `capabilities` is a static feature map (`buttons`, `snapshots`, `autocreate`, `tomlDts`, `buttonResponseObject`, `derivedDtsTypes`) so clients can do explicit feature detection without probing endpoints |
 | GET | `/metrics` | Prometheus metrics |
+| GET | `/openapi.json` | OpenAPI 3.1 spec (whole `/api` + `/api/v2` surface; public) |
+| GET | `/docs` | Interactive API docs (public) |
 
 Tracking types: pokemon, raid, egg, quest, invasion, lure, nest, gym, fort, maxbattle.
+
+**`/api/v2/*` (strict v2 surface)**: Alongside the in-place `/api/*` endpoints above sits a clean, strict, documented v2 API for tracking + humans/profiles. It is served by the same huma instance (typed bodies, `additionalProperties:false`, no lenient coercion, problem+json errors).
+- **Tracking** is human-scoped: `GET|POST /api/v2/humans/{id}/tracking/{type}`, `GET|PUT|DELETE /api/v2/humans/{id}/tracking/{type}/{uid}`, bulk `DELETE …/{type}?uid=1,2,3`, and a full snapshot `GET /api/v2/humans/{id}/tracking` (human + all-type rules + profiles + locations + summaries). Query params: `?profile=`, `?include_descriptions=`, `?silent=`, `?all_profiles=`. v2 adds an **11th tracking type, `incident`** (game `PokestopEvent`, e.g. Showcase), not present in v1.
+- **humans/profiles** are discrete typed action endpoints under `/api/v2/humans/{id}/…` (enable/disable, admin-disable, language, location, areas, check-location, locations CRUD incl. a **new `PUT …/locations/{label}`** to update coords, roles, profiles CRUD with a strict typed `active_hours` schema, profile switch). Pure action endpoints return a minimal `{"status":"ok"}` ack; resource endpoints return the typed body directly.
+- Design doc: `docs/v2-api-design.md`.
+
+**v1 is frozen**: the v1 `/api/tracking/*`, `/api/humans/*`, `/api/profiles/*` (and `/api/tracking/pokemon/refresh`) endpoints remain on plain gin, unchanged and fully supported (still lenient via the coercion below), but deprecated — clients migrate to `/api/v2` on their own schedule. No sunset date yet.
 
 **Flexible JSON type coercion**: All tracking CRUD POST endpoints accept flexible JSON types for numeric and boolean fields. Third-party clients like ReactMap may send `"clean": false` (boolean) instead of `"clean": 0` (number). The `flexBool` and `flexInt` custom JSON types in `processor/internal/api/tracking.go` handle this coercion transparently:
 - `flexBool`: accepts `true`/`false`, `0`/`1`, `"0"`/`"1"` — coerces to int (0 or 1)
@@ -697,8 +716,9 @@ The store is a separate pogreb instance from the geocoder cache — different wo
 - `!<type> mute ...` aliases (e.g. `!raid mute id:X`) route through `RouteToMuteFromType`.
 - `!tracked` shows the active mutes alongside tracking rules.
 - Mute buttons on alerts (see "Button actions" below) write the same `mute.Entry` shape via `buttonactions.HandleMute`.
+- **v2 mutes API** (`internal/api/v2_mutes.go`): `GET|POST /api/v2/humans/{id}/mutes`, `DELETE …/mutes?scope=&value=` (single) and `DELETE …/mutes` (all). Strict schemas, problem+json; mute identity is `(scope, value)` so deletes address via query params; DELETE returns `{deleted:[…]}` like v2 tracking. Area values validate against `AreaLogic` when present, else live `StateMgr` fences (production path). The v2 full snapshot includes a `mutes` array. The API documents the in-memory volatility — entries vanish on restart. Design: `docs/superpowers/specs/2026-06-11-mute-api-design.md`.
 
-Tracking-UID mutes (`!mute id:N` / `!mute raid id:N`) are documented in the design but rejected by the v1 parser — they need `MatchedUser.RuleUID` plumbing in the matcher first.
+Tracking-UID mutes are fully wired: the matcher compares `mute.Event.MatchedRuleUID` (populated per matched user in `cmd/processor/helpers.go`) against `tracking`-scope entries, created via `!mute id:N`, alert buttons, or the v2 mutes API.
 
 ## Button Actions
 
@@ -782,8 +802,9 @@ MySQL (or MariaDB). Key tables:
 - `forts` — fort update tracking (fort_type, include_empty, change_types)
 - `maxbattle` — max battle tracking (pokemon_id, level, gmax, move)
 - `profiles` — user profiles (profile_no, name, pokemon/raid/egg/invasion area overrides)
+- `user_locations` — per-user saved named locations (label → lat/lon) referenced by per-rule `override_location_label`
 
-All tracking tables have: `id` (FK to humans), `profile_no`, `distance`, `template`, `clean`, `ping`.
+All tracking tables have: `id` (FK to humans), `profile_no`, `distance`, `template`, `clean`, `ping`, `override_location_label` (nullable string), `override_areas` (nullable JSON array).
 
 Migrations in `processor/internal/db/migrations/` (SQL files, run on processor startup). The DSN includes `multiStatements=true` to support multi-statement migration files on fresh installations.
 
@@ -854,6 +875,8 @@ Discord/Telegram fetch to display the image.
 
 Why `URLWithBytes` exists: before this mode, a single event fanning out to N Discord-upload destinations plus a Telegram destination triggered N separate downloads of the public URL from the processor (one per destination, inside each job's critical section). Each download was a chance for Cloudflare-style proxy buffering to fail — losing the map for that destination. `URLWithBytes` collapses those N downloads into one, routes it through the internal URL, and guarantees the same bytes for every Discord destination in the batch.
 
+**Per-message byte gating** (`tileBytesForMessage` in `cmd/processor/render.go`): the batch tile mode is decided once for all matched users, but the bytes are attached **per rendered message** — only when that message's embed image URL equals the resolved `staticMap` tile URL. A single event fans out to many templates: one may render `{{staticMap}}` (gets the bytes), another may set a static image (`"image":{"url":"https://…/x.png"}`) or a **hand-built** tileserver URL (`https://…/staticmap/poracle-monster?imgUrl={{imgUrl}}&…`). The hand-built case is exactly why gating happens here and not on `tileMode` alone: `UsesTile` matches the substring `staticmap`, so a hand-built URL trips it and the batch generates bytes even though that template renders its own URL. Without gating, delivery's `len(StaticMapData) > 0 && imageURL != ""` short-circuit would upload the poracle tile over the operator's chosen image. Gating returns nil bytes for those messages so delivery downloads their real image instead.
+
 ## Configuration
 
 Single TOML file at `config/config.toml`, used by the processor. See `config/config.example.toml` for all options with comments.
@@ -873,3 +896,15 @@ The legacy `[alerter]` section is still read for backward-compatible `api_secret
 - Build and run: `cd processor && go build ./cmd/processor && ./poracle-processor -basedir ..`
 - Config paths resolve relative to project root via `-basedir` flag
 - Cache files (clean-cache, geofence cache, gym-state) resolve relative to `getConfigDir()` — the `config/` directory
+
+### Pre-commit gate (mandatory before any commit)
+
+Every commit MUST pass these four checks from `processor/`:
+
+```bash
+go build ./... && go vet ./... && go test -count=1 ./... && golangci-lint run ./...
+```
+
+The same four run as a required check on every push and PR via `.github/workflows/ci.yml`. Failing CI blocks merge. Don't paper over a lint failure with `//nolint:foo` unless the suppression has a clear comment justifying why the rule doesn't apply (e.g. "intentional determinism check — see `quest_test.go:34`").
+
+Lint config lives at `.golangci.yml` (repo root). It silences two conventional Go patterns: `defer X.Close()` errcheck and test-only `Write` errcheck. Anything not on the exclusion list is real and must be fixed, not suppressed.

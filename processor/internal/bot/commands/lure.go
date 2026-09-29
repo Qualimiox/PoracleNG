@@ -17,6 +17,8 @@ var lureParams = []bot.ParamDef{
 	{Type: bot.ParamRemoveUID},
 	{Type: bot.ParamPrefixSingle, Key: "arg.prefix.d"},
 	{Type: bot.ParamPrefixString, Key: "arg.prefix.template"},
+	{Type: bot.ParamPrefixString, Key: "arg.prefix.location"},
+	{Type: bot.ParamPrefixStringList, Key: "arg.prefix.area"},
 	{Type: bot.ParamKeyword, Key: "arg.remove"},
 	{Type: bot.ParamKeyword, Key: "arg.everything"},
 	{Type: bot.ParamKeyword, Key: "arg.clean"},
@@ -56,17 +58,26 @@ func (c *LureCommand) Run(ctx *bot.CommandContext, args []string) []bot.Reply {
 		return []bot.Reply{*block}
 	}
 
-	// Collect lure IDs
-	lureIDs := []int{}
-	if parsed.LureType != 0 || parsed.HasKeyword("arg.everything") {
-		if parsed.HasKeyword("arg.everything") {
-			lureIDs = append(lureIDs, 0) // 0 = any lure
-		} else {
-			lureIDs = append(lureIDs, parsed.LureType)
+	override, overrideReply := parseOverride(ctx, parsed.Strings["location"], parsed.StringLists["area"], common.Distance)
+	if overrideReply != nil {
+		return []bot.Reply{*overrideReply}
+	}
+
+	// Collect lure IDs — one tracking rule per named type, or the 0
+	// sentinel (any lure) for the everything keyword.
+	var lureIDs []int
+	switch {
+	case parsed.HasKeyword("arg.everything"):
+		lureIDs = []int{0}
+	case len(parsed.LureTypes) > 0:
+		seen := make(map[int]bool)
+		for _, id := range parsed.LureTypes {
+			if !seen[id] {
+				seen[id] = true
+				lureIDs = append(lureIDs, id)
+			}
 		}
-	} else if parsed.LureType == 0 && !parsed.HasKeyword("arg.everything") {
-		// Check if a lure type name matched with ID 0 (normal)
-		// If no lure type at all, show error
+	default:
 		return []bot.Reply{{React: "🙅", Text: tr.T("msg.no_lure_type")}}
 	}
 
@@ -84,13 +95,15 @@ func (c *LureCommand) Run(ctx *bot.CommandContext, args []string) []bot.Reply {
 	insert := make([]db.LureTrackingAPI, 0, len(lureIDs))
 	for _, id := range lureIDs {
 		insert = append(insert, db.LureTrackingAPI{
-			ID:        ctx.TargetID,
-			ProfileNo: ctx.ProfileNo,
-			Ping:      pings,
-			LureID:    id,
-			Distance:  common.Distance,
-			Template:  common.Template,
-			Clean:     common.Clean,
+			ID:                    ctx.TargetID,
+			ProfileNo:             ctx.ProfileNo,
+			Ping:                  pings,
+			LureID:                id,
+			Distance:              common.Distance,
+			Template:              common.Template,
+			Clean:                 common.Clean,
+			OverrideLocationLabel: override.LocationLabel,
+			OverrideAreas:         override.Areas,
 		})
 	}
 

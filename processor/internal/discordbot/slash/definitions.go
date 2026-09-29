@@ -216,7 +216,7 @@ func buildCommandDef(bundle *i18n.Bundle, key, canon string) *discordgo.Applicat
 // untrackOptions exposes one sub-command per tracking type. Each sub-command
 // has a single autocomplete-backed "tracking" option whose value is the
 // database UID of the rule the user wants to remove. The sub-command name
-// IS the tracking subtype — both the slash dispatcher (findUntrackSubtype)
+// IS the tracking subtype — both the slash dispatcher (subCommandName)
 // and the autocomplete lister read it directly to scope the choice list.
 func untrackOptions(bundle *i18n.Bundle) []*discordgo.ApplicationCommandOption {
 	subs := []string{"pokemon", "raid", "egg", "quest", "invasion", "lure", "nest", "gym", "fort", "maxbattle"}
@@ -275,16 +275,17 @@ func infoOptions(bundle *i18n.Bundle) []*discordgo.ApplicationCommandOption {
 	}
 }
 
-// areaOptions exposes /area add, /area remove, /area list (every area the
+// areaOptions exposes /area add, /area remove (both take a comma-separated
+// list — the picker composes one), /area list (every area the
 // user could subscribe to, with ✓ marks for the ones they already have),
 // /area overview (overview map of selected areas), and /area show (list of
 // selected area names).
 func areaOptions(bundle *i18n.Bundle) []*discordgo.ApplicationCommandOption {
 	return []*discordgo.ApplicationCommandOption{
 		subCommand(bundle, "area.add", "add", "Add an area to your tracking",
-			stringOpt(bundle, "area.add.area", "area", "Area to add", true, true)),
+			stringOpt(bundle, "area.add.area", "area", "Areas to add (comma-separated)", true, true)),
 		subCommand(bundle, "area.remove", "remove", "Remove an area from your tracking",
-			stringOpt(bundle, "area.remove.area", "area", "Area to remove", true, true)),
+			stringOpt(bundle, "area.remove.area", "area", "Areas to remove (comma-separated)", true, true)),
 		subCommand(bundle, "area.show", "show", "Show your selected areas"),
 		subCommand(bundle, "area.list", "list", "List every area available to you (✓ = already added)"),
 		subCommand(bundle, "area.overview", "overview", "Map overview of every area available to you"),
@@ -382,6 +383,20 @@ func distanceOpt(bundle *i18n.Bundle, cmdKey string) *discordgo.ApplicationComma
 	return intOpt(bundle, cmdKey+".distance", "distance", "Alert radius in metres", false)
 }
 
+// trackerLocationAreaOpts returns the two shared options appended to every
+// tracker slash command: `location` (named-location override, requires
+// distance:) and `areas` (comma-separated area filter).
+//
+// Both options are optional strings backed by autocomplete. The i18n keys
+// live under "tracker" (not per-command) because the description is identical
+// across all 10 commands.
+func trackerLocationAreaOpts(bundle *i18n.Bundle) []*discordgo.ApplicationCommandOption {
+	return []*discordgo.ApplicationCommandOption{
+		stringOpt(bundle, "tracker.location", "location", "Use a saved location instead of your default (requires distance:)", false, true),
+		stringOpt(bundle, "tracker.areas", "areas", "Restrict to specific areas (comma-separated)", false, true),
+	}
+}
+
 // templateOpt builds the standard "template" string option used by every
 // tracking command. Autocomplete is always on (DTS template name lookup).
 func templateOpt(bundle *i18n.Bundle, cmdKey string) *discordgo.ApplicationCommandOption {
@@ -444,12 +459,28 @@ func summaryOptions(bundle *i18n.Bundle) []*discordgo.ApplicationCommandOption {
 	}
 }
 
-// locationOptions exposes /location with a single required "place" option
-// that accepts either "lat,lon" coordinates or a free-form place name. The
-// mapper forward-geocodes place names via deps.Geocoder when present.
+// locationOptions exposes /location with six sub-commands that mirror the
+// text command's grammar:
+//
+//	add <name> <place>  — save a named location (geocoding done by text cmd)
+//	list                — list all saved locations
+//	show <name>         — show one saved location (autocomplete)
+//	remove <name>       — remove a saved location or "default" (autocomplete)
+//	set-default <place> — set the default location (coords or address)
+//	remove-default      — clear the default lat/lon location
 func locationOptions(bundle *i18n.Bundle) []*discordgo.ApplicationCommandOption {
 	return []*discordgo.ApplicationCommandOption{
-		stringOpt(bundle, "location.place", "place", "Coordinates (\"51.28, 1.08\") or a place name", true, false),
+		subCommand(bundle, "location.add", "add", "Save a named location",
+			stringOpt(bundle, "location.add.name", "name", "Short name for this location (e.g. Home)", true, false),
+			stringOpt(bundle, "location.add.place", "place", "Coordinates (lat,lon) or a place name", true, false)),
+		subCommand(bundle, "location.list", "list", "List your saved locations"),
+		subCommand(bundle, "location.show", "show", "Show one saved location",
+			stringOpt(bundle, "location.show.name", "name", "Saved-location name", true, true)),
+		subCommand(bundle, "location.remove", "remove", "Remove a saved location",
+			stringOpt(bundle, "location.remove.name", "name", "Saved-location name (or \"default\" to clear your default location)", true, true)),
+		subCommand(bundle, "location.set-default", "set-default", "Set your default location",
+			stringOpt(bundle, "location.set-default.place", "place", "Coordinates (lat,lon) or address to set as your default location", true, false)),
+		subCommand(bundle, "location.remove-default", "remove-default", "Clear your default location"),
 	}
 }
 
@@ -458,7 +489,7 @@ func locationOptions(bundle *i18n.Bundle) []*discordgo.ApplicationCommandOption 
 func trackOptions(bundle *i18n.Bundle) []*discordgo.ApplicationCommandOption {
 	sizeName, sizeNameLoc := optName(bundle, "track.size", "size")
 	sizeDesc, sizeDescLoc := optDesc(bundle, "track.size", "Pokemon size class")
-	return []*discordgo.ApplicationCommandOption{
+	opts := []*discordgo.ApplicationCommandOption{
 		stringOpt(bundle, "track.pokemon", "pokemon", "Pokemon to track (or 'everything')", true, true),
 		stringOpt(bundle, "track.iv", "iv", "IV filter (e.g. 100, 95, 0-0)", false, true),
 		distanceOpt(bundle, "track"),
@@ -468,6 +499,7 @@ func trackOptions(bundle *i18n.Bundle) []*discordgo.ApplicationCommandOption {
 		cleanOpt(bundle, "track", "Auto-delete the alert when the pokemon despawns"),
 		templateOpt(bundle, "track"),
 		stringOpt(bundle, "track.form", "form", "Pokemon form", false, true),
+		stringOpt(bundle, "track.costume", "costume", "Pokemon costume", false, true),
 		{
 			Type:                     discordgo.ApplicationCommandOptionString,
 			Name:                     sizeName,
@@ -477,6 +509,7 @@ func trackOptions(bundle *i18n.Bundle) []*discordgo.ApplicationCommandOption {
 			Choices:                  sizeChoices(bundle),
 		},
 	}
+	return append(opts, trackerLocationAreaOpts(bundle)...)
 }
 
 // raidOptions builds the slash option list for /raid. Boss XOR level is
@@ -487,7 +520,7 @@ func raidOptions(bundle *i18n.Bundle) []*discordgo.ApplicationCommandOption {
 	levelDesc, levelDescLoc := optDesc(bundle, "raid.level", "Raid level")
 	teamName, teamNameLoc := optName(bundle, "raid.team", "team")
 	teamDesc, teamDescLoc := optDesc(bundle, "raid.team", "Required gym-control team")
-	return []*discordgo.ApplicationCommandOption{
+	opts := []*discordgo.ApplicationCommandOption{
 		stringOpt(bundle, "raid.boss", "boss", "Raid boss pokemon", false, true),
 		{
 			Type:                     discordgo.ApplicationCommandOptionString,
@@ -508,7 +541,10 @@ func raidOptions(bundle *i18n.Bundle) []*discordgo.ApplicationCommandOption {
 		distanceOpt(bundle, "raid"),
 		cleanOpt(bundle, "raid", "Auto-delete the alert when the raid expires"),
 		templateOpt(bundle, "raid"),
+		stringOpt(bundle, "raid.form", "form", "Raid boss form", false, true),
+		stringOpt(bundle, "raid.costume", "costume", "Raid boss costume", false, true),
 	}
+	return append(opts, trackerLocationAreaOpts(bundle)...)
 }
 
 // eggOptions builds the slash option list for /egg. Level is required.
@@ -517,7 +553,7 @@ func eggOptions(bundle *i18n.Bundle) []*discordgo.ApplicationCommandOption {
 	levelDesc, levelDescLoc := optDesc(bundle, "egg.level", "Egg / raid level")
 	teamName, teamNameLoc := optName(bundle, "egg.team", "team")
 	teamDesc, teamDescLoc := optDesc(bundle, "egg.team", "Required gym-control team")
-	return []*discordgo.ApplicationCommandOption{
+	opts := []*discordgo.ApplicationCommandOption{
 		{
 			Type:                     discordgo.ApplicationCommandOptionString,
 			Name:                     levelName,
@@ -539,6 +575,7 @@ func eggOptions(bundle *i18n.Bundle) []*discordgo.ApplicationCommandOption {
 		cleanOpt(bundle, "egg", "Auto-delete the alert when the egg hatches"),
 		templateOpt(bundle, "egg"),
 	}
+	return append(opts, trackerLocationAreaOpts(bundle)...)
 }
 
 // questOptions builds the slash option list for /quest. Reward types are
@@ -551,10 +588,11 @@ func questOptions(bundle *i18n.Bundle) []*discordgo.ApplicationCommandOption {
 	summaryName, summaryNameLoc := optName(bundle, "quest.summary", "summary")
 	summaryDesc, summaryDescLoc := optDesc(bundle, "quest.summary", "Buffer matches and dispatch in a scheduled batch instead of alerting immediately")
 	summaryYesName, summaryYesLoc := choiceName(bundle, "quest.summary.yes", "Yes")
-	return []*discordgo.ApplicationCommandOption{
+	opts := []*discordgo.ApplicationCommandOption{
 		stringOpt(bundle, "quest.pokemon", "pokemon", "Pokemon reward", false, true),
 		stringOpt(bundle, "quest.item", "item", "Item reward (e.g. golden razz berry)", false, true),
 		intOpt(bundle, "quest.stardust", "stardust", "Stardust reward (minimum amount)", false),
+		intOpt(bundle, "quest.pokecoins", "pokecoins", "Pokecoin reward (minimum amount)", false),
 		stringOpt(bundle, "quest.candy", "candy", "Candy reward pokemon", false, true),
 		stringOpt(bundle, "quest.mega_energy", "mega_energy", "Mega energy reward pokemon", false, true),
 		// xl_candy intentionally omitted — matching/quest.go and
@@ -584,6 +622,7 @@ func questOptions(bundle *i18n.Bundle) []*discordgo.ApplicationCommandOption {
 		},
 		templateOpt(bundle, "quest"),
 	}
+	return append(opts, trackerLocationAreaOpts(bundle)...)
 }
 
 // invasionOptions builds the slash option list for /invasion. grunt_type is
@@ -596,7 +635,7 @@ func invasionOptions(bundle *i18n.Bundle) []*discordgo.ApplicationCommandOption 
 	maleName, maleLoc := choiceName(bundle, "invasion.gender.male", "Male")
 	femaleName, femaleLoc := choiceName(bundle, "invasion.gender.female", "Female")
 	genderlessName, genderlessLoc := choiceName(bundle, "invasion.gender.genderless", "Genderless")
-	return []*discordgo.ApplicationCommandOption{
+	opts := []*discordgo.ApplicationCommandOption{
 		stringOpt(bundle, "invasion.grunt_type", "grunt_type", "Grunt type (Fire, Water…), boss (Giovanni…), or incident (Kecleon…)", true, true),
 		{
 			Type:                     discordgo.ApplicationCommandOptionString,
@@ -614,6 +653,7 @@ func invasionOptions(bundle *i18n.Bundle) []*discordgo.ApplicationCommandOption 
 		cleanOpt(bundle, "invasion", "Auto-delete the alert when the invasion expires"),
 		templateOpt(bundle, "invasion"),
 	}
+	return append(opts, trackerLocationAreaOpts(bundle)...)
 }
 
 // incidentOptions builds the slash option list for /incident — the
@@ -622,19 +662,20 @@ func invasionOptions(bundle *i18n.Bundle) []*discordgo.ApplicationCommandOption 
 // cmd.invasion handler because cmd.incident is just an alias on the
 // text-bot side; both write the same gruntType DB column.
 func incidentOptions(bundle *i18n.Bundle) []*discordgo.ApplicationCommandOption {
-	return []*discordgo.ApplicationCommandOption{
+	opts := []*discordgo.ApplicationCommandOption{
 		stringOpt(bundle, "incident.type", "type", "Pokestop incident type (Kecleon, Gold Pokestop, Showcase…)", true, true),
 		distanceOpt(bundle, "incident"),
 		cleanOpt(bundle, "incident", "Auto-delete the alert when the incident expires"),
 		templateOpt(bundle, "incident"),
 	}
+	return append(opts, trackerLocationAreaOpts(bundle)...)
 }
 
 // lureOptions builds the slash option list for /lure. lure_type is required.
 func lureOptions(bundle *i18n.Bundle) []*discordgo.ApplicationCommandOption {
 	lureTypeName, lureTypeNameLoc := optName(bundle, "lure.lure_type", "lure_type")
 	lureTypeDesc, lureTypeDescLoc := optDesc(bundle, "lure.lure_type", "Lure type")
-	return []*discordgo.ApplicationCommandOption{
+	opts := []*discordgo.ApplicationCommandOption{
 		{
 			Type:                     discordgo.ApplicationCommandOptionString,
 			Name:                     lureTypeName,
@@ -648,24 +689,26 @@ func lureOptions(bundle *i18n.Bundle) []*discordgo.ApplicationCommandOption {
 		cleanOpt(bundle, "lure", "Auto-delete the alert when the lure expires"),
 		templateOpt(bundle, "lure"),
 	}
+	return append(opts, trackerLocationAreaOpts(bundle)...)
 }
 
 // nestOptions builds the slash option list for /nest. pokemon is required.
 func nestOptions(bundle *i18n.Bundle) []*discordgo.ApplicationCommandOption {
-	return []*discordgo.ApplicationCommandOption{
+	opts := []*discordgo.ApplicationCommandOption{
 		stringOpt(bundle, "nest.pokemon", "pokemon", "Nesting pokemon", true, true),
 		intOpt(bundle, "nest.min_spawn_avg", "min_spawn_avg", "Minimum spawns per hour", false),
 		distanceOpt(bundle, "nest"),
 		cleanOpt(bundle, "nest", "Auto-delete the alert when the nest expires"),
 		templateOpt(bundle, "nest"),
 	}
+	return append(opts, trackerLocationAreaOpts(bundle)...)
 }
 
 // maxbattleOptions builds the slash option list for /maxbattle.
 func maxbattleOptions(bundle *i18n.Bundle) []*discordgo.ApplicationCommandOption {
 	levelName, levelNameLoc := optName(bundle, "maxbattle.level", "level")
 	levelDesc, levelDescLoc := optDesc(bundle, "maxbattle.level", "Battle level (1..6)")
-	return []*discordgo.ApplicationCommandOption{
+	opts := []*discordgo.ApplicationCommandOption{
 		stringOpt(bundle, "maxbattle.pokemon", "pokemon", "Max battle pokemon", true, true),
 		{
 			Type:                     discordgo.ApplicationCommandOptionInteger,
@@ -680,6 +723,7 @@ func maxbattleOptions(bundle *i18n.Bundle) []*discordgo.ApplicationCommandOption
 		cleanOpt(bundle, "maxbattle", "Auto-delete the alert when the battle ends"),
 		templateOpt(bundle, "maxbattle"),
 	}
+	return append(opts, trackerLocationAreaOpts(bundle)...)
 }
 
 // gymOptions builds the slash option list for /gym. Team is optional —
@@ -687,7 +731,7 @@ func maxbattleOptions(bundle *i18n.Bundle) []*discordgo.ApplicationCommandOption
 func gymOptions(bundle *i18n.Bundle) []*discordgo.ApplicationCommandOption {
 	teamName, teamNameLoc := optName(bundle, "gym.team", "team")
 	teamDesc, teamDescLoc := optDesc(bundle, "gym.team", "Gym-control team to alert on")
-	return []*discordgo.ApplicationCommandOption{
+	opts := []*discordgo.ApplicationCommandOption{
 		{
 			Type:                     discordgo.ApplicationCommandOptionInteger,
 			Name:                     teamName,
@@ -702,13 +746,14 @@ func gymOptions(bundle *i18n.Bundle) []*discordgo.ApplicationCommandOption {
 		cleanOpt(bundle, "gym", "Auto-delete the alert when the gym state changes"),
 		templateOpt(bundle, "gym"),
 	}
+	return append(opts, trackerLocationAreaOpts(bundle)...)
 }
 
 // fortOptions builds the slash option list for /fort. fort_type is required.
 func fortOptions(bundle *i18n.Bundle) []*discordgo.ApplicationCommandOption {
 	fortTypeName, fortTypeNameLoc := optName(bundle, "fort.fort_type", "fort_type")
 	fortTypeDesc, fortTypeDescLoc := optDesc(bundle, "fort.fort_type", "Fort type to track")
-	return []*discordgo.ApplicationCommandOption{
+	opts := []*discordgo.ApplicationCommandOption{
 		{
 			Type:                     discordgo.ApplicationCommandOptionInteger,
 			Name:                     fortTypeName,
@@ -723,6 +768,7 @@ func fortOptions(bundle *i18n.Bundle) []*discordgo.ApplicationCommandOption {
 		cleanOpt(bundle, "fort", "Auto-delete the alert when the fort changes again"),
 		templateOpt(bundle, "fort"),
 	}
+	return append(opts, trackerLocationAreaOpts(bundle)...)
 }
 
 // choiceDef is the static (value, English label) pair feeding choiceList.

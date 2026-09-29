@@ -47,7 +47,6 @@ func DiffAndClassify[T any](
 	var result DiffResult[T]
 
 	for i := len(candidates) - 1; i >= 0; i-- {
-		classified := false
 		for j := range existing {
 			noMatch, isDup, uid, isUpd := db.DiffTracking(&existing[j], &candidates[i])
 			if noMatch {
@@ -56,7 +55,6 @@ func DiffAndClassify[T any](
 			if isDup {
 				result.AlreadyPresent = append(result.AlreadyPresent, candidates[i])
 				candidates = append(candidates[:i], candidates[i+1:]...)
-				classified = true
 				break
 			}
 			if isUpd {
@@ -64,15 +62,12 @@ func DiffAndClassify[T any](
 				setUID(&update, uid)
 				result.Updates = append(result.Updates, update)
 				candidates = append(candidates[:i], candidates[i+1:]...)
-				classified = true
 				break
 			}
 		}
-		if !classified {
-			// Stays in candidates — will be a new insert
-		}
 	}
 
+	// Unmatched candidates stay in the slice and become new inserts.
 	result.Inserts = candidates
 	return result
 }
@@ -101,16 +96,24 @@ func ApplyDiff[T any](
 		}
 	}
 
-	// Insert new + updated rows
+	// Insert new + updated rows, writing each generated UID back into the
+	// diff row. The SQL store's Insert returns the UID without mutating the
+	// row (only the mock mutates), and callers build API responses from
+	// these rows — without the write-back, inserts would report uid 0 and
+	// updates the old, just-deleted uid.
 	for i := range diff.Inserts {
-		if _, err := store.Insert(&diff.Inserts[i]); err != nil {
+		uid, err := store.Insert(&diff.Inserts[i])
+		if err != nil {
 			return diff, err
 		}
+		setUID(&diff.Inserts[i], uid)
 	}
 	for i := range diff.Updates {
-		if _, err := store.Insert(&diff.Updates[i]); err != nil {
+		uid, err := store.Insert(&diff.Updates[i])
+		if err != nil {
 			return diff, err
 		}
+		setUID(&diff.Updates[i], uid)
 	}
 
 	return diff, nil

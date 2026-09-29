@@ -57,6 +57,23 @@ func runMaxbattle(t *testing.T, ctx *bot.CommandContext, input string) []bot.Rep
 	return cmd.Run(ctx, args)
 }
 
+func TestMaxbattle_Remove_FormRejected(t *testing.T) {
+	ctx := maxbattleCtx(t)
+	runMaxbattle(t, ctx, "25")
+	rows, _ := ctx.Tracking.Maxbattles.SelectByIDProfile("user1", 1)
+	require.Len(t, rows, 1)
+
+	// Pokemon remove (!untrack) treats form: as unrecognized; maxbattle
+	// remove must do the same rather than silently removing every form.
+	replies := runMaxbattle(t, ctx, "remove 25 form:burn")
+	require.NotEmpty(t, replies)
+	assert.Equal(t, "🙅", replies[0].React, "reply: %s", replies[0].Text)
+	assert.Contains(t, replies[0].Text, "form:burn")
+
+	rows, _ = ctx.Tracking.Maxbattles.SelectByIDProfile("user1", 1)
+	assert.Len(t, rows, 1, "rejected remove must not delete anything")
+}
+
 func TestMaxbattle_BasicPokemon(t *testing.T) {
 	ctx := maxbattleCtx(t)
 	replies := runMaxbattle(t, ctx, "25")
@@ -153,4 +170,36 @@ func TestMaxbattle_Gmax(t *testing.T) {
 	rows, _ := ctx.Tracking.Maxbattles.SelectByIDProfile("user1", 1)
 	require.Len(t, rows, 1)
 	assert.Equal(t, 1, rows[0].Gmax, "gmax should be 1")
+}
+
+func TestMaxbattle_AcceptsAreaOverride(t *testing.T) {
+	ctx, _ := newTestLocationCtx(t)
+
+	maxbattles := store.NewMockTrackingStore[db.MaxbattleTrackingAPI](
+		store.MaxbattleGetUID, store.MaxbattleSetUID,
+	)
+	ctx.Tracking = &store.TrackingStores{Maxbattles: maxbattles}
+
+	gd := &gamedata.GameData{
+		Monsters: map[gamedata.MonsterKey]*gamedata.Monster{
+			{ID: 25, Form: 0}: {PokemonID: 25, FormID: 0},
+		},
+		Moves: map[int]*gamedata.Move{},
+		Types: map[int]*gamedata.TypeInfo{},
+	}
+	resolver := bot.NewPokemonResolver(gd, ctx.Translations, []string{"en"}, nil)
+	ctx.Resolver = resolver
+	ctx.ArgMatcher = bot.NewArgMatcher(ctx.Translations, gd, resolver, []string{"en"})
+	ctx.GameData = gd
+	ctx.RowText = &rowtext.Generator{GD: gd, Translations: ctx.Translations, DefaultTemplateName: "1"}
+	ctx.HasArea = true
+
+	cmd := &MaxbattleCommand{}
+	replies := cmd.Run(ctx, strings.Fields("everything area:london"))
+	require.NotEmpty(t, replies)
+	assert.NotEqual(t, "🙅", replies[0].React, "rejected: %+v", replies)
+
+	rules, _ := ctx.Tracking.Maxbattles.SelectByIDProfile("user1", 1)
+	require.Len(t, rules, 1)
+	assert.Len(t, rules[0].OverrideAreas, 1, "override not stored: %+v", rules[0])
 }

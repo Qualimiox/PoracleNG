@@ -99,7 +99,7 @@ func (p *Photon) Reverse(lat, lon float64, language string) (*Address, error) {
 
 	var result photonResponse
 	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("photon: unmarshal: %w", err)
+		return nil, fmt.Errorf("photon: unmarshal reverse response (%s): %w", bodySnippet(body), err)
 	}
 	if len(result.Features) == 0 {
 		return nil, fmt.Errorf("photon: no results")
@@ -275,7 +275,7 @@ func (p *Photon) Forward(query string) ([]ForwardResult, error) {
 
 	var result photonResponse
 	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("photon: unmarshal: %w", err)
+		return nil, fmt.Errorf("photon: unmarshal search response (%s): %w", bodySnippet(body), err)
 	}
 
 	out := make([]ForwardResult, 0, len(result.Features))
@@ -285,11 +285,29 @@ func (p *Photon) Forward(query string) ([]ForwardResult, error) {
 		}
 		components := photonComponents(f.Properties)
 		city := components["city"]
+		// Read country BEFORE composing: formatOpenCage mutates components and
+		// deletes "country" when the provider is configured with
+		// includeCountry=false, which would blank the field here.
+		country := components["country"]
+		countryCode := strings.ToUpper(strings.TrimSpace(f.Properties.CountryCode))
+
 		out = append(out, ForwardResult{
 			Latitude:  f.Geometry.Coordinates[1],
 			Longitude: f.Geometry.Coordinates[0],
-			City:      city,
-			Country:   components["country"],
+			// Photon returns no single formatted string, so compose one the
+			// same way Reverse does — via the OpenCage country templates —
+			// rather than inventing a second, less aware format. Without it
+			// Photon is the one provider leaving displayName empty, and it is
+			// the provider most likely to be configured by whoever adopts
+			// this endpoint first.
+			DisplayName:  p.formatOpenCage(components, countryCode),
+			Name:         f.Properties.Name,
+			StreetNumber: f.Properties.HouseNumber,
+			StreetName:   f.Properties.Street,
+			City:         city,
+			State:        f.Properties.State,
+			Zipcode:      f.Properties.Postcode,
+			Country:      country,
 		})
 	}
 	return out, nil

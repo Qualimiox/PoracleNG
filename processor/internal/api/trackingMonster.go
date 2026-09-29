@@ -106,38 +106,42 @@ func HandleDeleteMonster(deps *TrackingDeps) gin.HandlerFunc {
 // monsterInsertRequest represents a single monster tracking row from the POST body.
 // The JS handler has a cleanRow function that applies defaults and validates.
 type monsterInsertRequest struct {
-	UID              flexInt  `json:"uid"`
-	PokemonID        flexInt  `json:"pokemon_id"`
-	ProfileNo        flexInt  `json:"profile_no"`
-	Distance         flexInt  `json:"distance"`
-	Template         any      `json:"template"`
-	Clean            flexBool `json:"clean"`
-	Form             flexInt  `json:"form"`
-	MinIV            flexInt  `json:"min_iv"`
-	MaxIV            flexInt  `json:"max_iv"`
-	MinCP            flexInt  `json:"min_cp"`
-	MaxCP            flexInt  `json:"max_cp"`
-	MinLevel         flexInt  `json:"min_level"`
-	MaxLevel         flexInt  `json:"max_level"`
-	ATK              flexInt  `json:"atk"`
-	DEF              flexInt  `json:"def"`
-	STA              flexInt  `json:"sta"`
-	MaxATK           flexInt  `json:"max_atk"`
-	MaxDEF           flexInt  `json:"max_def"`
-	MaxSTA           flexInt  `json:"max_sta"`
-	Gender           flexInt  `json:"gender"`
-	MinWeight        flexInt  `json:"min_weight"`
-	MaxWeight        flexInt  `json:"max_weight"`
-	MinTime          flexInt  `json:"min_time"`
-	Rarity           flexInt  `json:"rarity"`
-	MaxRarity        flexInt  `json:"max_rarity"`
-	Size             flexInt  `json:"size"`
-	MaxSize          flexInt  `json:"max_size"`
-	PVPRankingLeague flexInt  `json:"pvp_ranking_league"`
-	PVPRankingBest   flexInt  `json:"pvp_ranking_best"`
-	PVPRankingWorst  flexInt  `json:"pvp_ranking_worst"`
-	PVPRankingMinCP  flexInt  `json:"pvp_ranking_min_cp"`
-	PVPRankingCap    flexInt  `json:"pvp_ranking_cap"`
+	UID                   flexInt  `json:"uid"`
+	PokemonID             flexInt  `json:"pokemon_id"`
+	ProfileNo             flexInt  `json:"profile_no"`
+	Distance              flexInt  `json:"distance"`
+	Template              any      `json:"template"`
+	Clean                 flexBool `json:"clean"`
+	Form                  flexInt  `json:"form"`
+	Costume               flexInt  `json:"costume"`
+	MinIV                 flexInt  `json:"min_iv"`
+	MaxIV                 flexInt  `json:"max_iv"`
+	MinCP                 flexInt  `json:"min_cp"`
+	MaxCP                 flexInt  `json:"max_cp"`
+	MinLevel              flexInt  `json:"min_level"`
+	MaxLevel              flexInt  `json:"max_level"`
+	ATK                   flexInt  `json:"atk"`
+	DEF                   flexInt  `json:"def"`
+	STA                   flexInt  `json:"sta"`
+	MaxATK                flexInt  `json:"max_atk"`
+	MaxDEF                flexInt  `json:"max_def"`
+	MaxSTA                flexInt  `json:"max_sta"`
+	Gender                flexInt  `json:"gender"`
+	MinWeight             flexInt  `json:"min_weight"`
+	MaxWeight             flexInt  `json:"max_weight"`
+	MinTime               flexInt  `json:"min_time"`
+	Rarity                flexInt  `json:"rarity"`
+	MaxRarity             flexInt  `json:"max_rarity"`
+	Size                  flexInt  `json:"size"`
+	MaxSize               flexInt  `json:"max_size"`
+	PVPRankingLeague      flexInt  `json:"pvp_ranking_league"`
+	PVPRankingBest        flexInt  `json:"pvp_ranking_best"`
+	PVPRankingWorst       flexInt  `json:"pvp_ranking_worst"`
+	PVPRankingMinCP       flexInt  `json:"pvp_ranking_min_cp"`
+	PVPRankingCap         flexInt  `json:"pvp_ranking_cap"`
+	PVPRankingEvolution   flexInt  `json:"pvp_ranking_evolution"`
+	OverrideLocationLabel string   `json:"override_location_label"`
+	OverrideAreas         []string `json:"override_areas"`
 }
 
 // HandleCreateMonster returns the POST /api/tracking/pokemon/{id} handler.
@@ -219,39 +223,48 @@ func HandleCreateMonster(deps *TrackingDeps) gin.HandlerFunc {
 			}
 
 			row := db.MonsterTrackingAPI{
-				ID:               human.ID,
-				ProfileNo:        pNo,
-				Ping:             "",
-				Template:         template,
-				PokemonID:        pokemonID,
-				Distance:         distance,
-				MinIV:            req.MinIV.intValue(-1),
-				MaxIV:            req.MaxIV.intValue(100),
-				MinCP:            req.MinCP.intValue(0),
-				MaxCP:            req.MaxCP.intValue(9000),
-				MinLevel:         req.MinLevel.intValue(0),
-				MaxLevel:         req.MaxLevel.intValue(55),
-				ATK:              req.ATK.intValue(0),
-				DEF:              req.DEF.intValue(0),
-				STA:              req.STA.intValue(0),
-				MaxATK:           req.MaxATK.intValue(15),
-				MaxDEF:           req.MaxDEF.intValue(15),
-				MaxSTA:           req.MaxSTA.intValue(15),
-				Gender:           req.Gender.intValue(0),
-				Form:             req.Form.intValue(0),
-				Clean:            req.Clean.intValue(0),
-				MinWeight:        req.MinWeight.intValue(0),
-				MaxWeight:        req.MaxWeight.intValue(9000000),
-				MinTime:          req.MinTime.intValue(0),
-				Rarity:           req.Rarity.intValue(-1),
-				MaxRarity:        req.MaxRarity.intValue(6),
-				Size:             req.Size.intValue(-1),
-				MaxSize:          req.MaxSize.intValue(5),
-				PVPRankingLeague: req.PVPRankingLeague.intValue(0),
-				PVPRankingBest:   req.PVPRankingBest.intValue(1),
-				PVPRankingWorst:  req.PVPRankingWorst.intValue(4096),
-				PVPRankingMinCP:  req.PVPRankingMinCP.intValue(0),
-				PVPRankingCap:    req.PVPRankingCap.intValue(0),
+				ID:        human.ID,
+				ProfileNo: pNo,
+				Ping:      "",
+				Template:  template,
+				PokemonID: pokemonID,
+				Distance:  distance,
+				MinIV:     req.MinIV.intValue(-1),
+				MaxIV:     req.MaxIV.intValue(100),
+				MinCP:     req.MinCP.intValue(0),
+				MaxCP:     req.MaxCP.intValue(9000),
+				MinLevel:  req.MinLevel.intValue(0),
+				MaxLevel:  req.MaxLevel.intValue(55),
+				ATK:       req.ATK.intValue(0),
+				DEF:       req.DEF.intValue(0),
+				STA:       req.STA.intValue(0),
+				MaxATK:    req.MaxATK.intValue(15),
+				MaxDEF:    req.MaxDEF.intValue(15),
+				MaxSTA:    req.MaxSTA.intValue(15),
+				Gender:    req.Gender.intValue(0),
+				Form:      req.Form.intValue(0),
+				// Costume defaults to 9000 (the "any costume" wildcard) when absent
+				// from the request body, so v1 clients that don't send costume
+				// (ReactMap/PoracleWeb, pre-costume-feature scripts) diff cleanly
+				// against existing 9000-backfilled rows instead of being classified
+				// as new inserts (Costume has no `diff` tag — see db.MonsterTrackingAPI).
+				// This is the AUTHORITATIVE v1 absent-costume default (the
+				// MonsterTrackingAPI.UnmarshalJSON guard is defence-in-depth only).
+				Costume:             req.Costume.intValue(9000),
+				Clean:               req.Clean.intValue(0),
+				MinWeight:           req.MinWeight.intValue(0),
+				MaxWeight:           req.MaxWeight.intValue(9000000),
+				MinTime:             req.MinTime.intValue(0),
+				Rarity:              req.Rarity.intValue(-1),
+				MaxRarity:           req.MaxRarity.intValue(6),
+				Size:                req.Size.intValue(-1),
+				MaxSize:             req.MaxSize.intValue(5),
+				PVPRankingLeague:    req.PVPRankingLeague.intValue(0),
+				PVPRankingBest:      req.PVPRankingBest.intValue(1),
+				PVPRankingWorst:     req.PVPRankingWorst.intValue(4096),
+				PVPRankingMinCP:     req.PVPRankingMinCP.intValue(0),
+				PVPRankingCap:       req.PVPRankingCap.intValue(0),
+				PVPRankingEvolution: req.PVPRankingEvolution.intValue(0),
 			}
 
 			if req.UID.isSet() {
@@ -261,16 +274,29 @@ func HandleCreateMonster(deps *TrackingDeps) gin.HandlerFunc {
 			return row, nil
 		}
 
+		// Pre-fetch override context once so per-row validation doesn't re-query.
+		oc, ocMsg, ocCode := newOverrideContext(deps, human.ID)
+		if ocMsg != "" {
+			trackingJSONError(c, ocCode, ocMsg)
+			return
+		}
+
 		// Split: rows with uid are explicit updates, without are inserts
 		var insert []db.MonsterTrackingAPI
 		var updates []db.MonsterTrackingAPI
 
 		for _, req := range insertReqs {
+			if msg, code := validateOverrideFields(deps, oc, human.ID, req.OverrideLocationLabel, req.OverrideAreas, req.Distance.intValue(0)); msg != "" {
+				trackingJSONError(c, code, msg)
+				return
+			}
 			row, err := cleanRow(req)
 			if err != nil {
 				trackingJSONError(c, http.StatusBadRequest, err.Error())
 				return
 			}
+			row.OverrideLocationLabel = req.OverrideLocationLabel
+			row.OverrideAreas = normalizeOverrideAreas(req.OverrideAreas)
 			if req.UID.isSet() {
 				updates = append(updates, row)
 			} else {
@@ -447,6 +473,7 @@ func toMonsterTracking(api *db.MonsterTrackingAPI) *db.MonsterTracking {
 		Template:         api.Template,
 		PokemonID:        api.PokemonID,
 		Form:             api.Form,
+		Costume:          api.Costume,
 		MinIV:            api.MinIV,
 		MaxIV:            api.MaxIV,
 		MinCP:            api.MinCP,

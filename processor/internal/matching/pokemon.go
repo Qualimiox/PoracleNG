@@ -23,6 +23,7 @@ const (
 type ProcessedPokemon struct {
 	PokemonID   int
 	Form        int
+	Costume     int
 	IV          float64 // -1 if not encountered
 	CP          int
 	Level       int
@@ -72,6 +73,7 @@ func ProcessPokemonWebhook(pokemon *webhook.PokemonWebhook, rarityGroup int, pvp
 	return &ProcessedPokemon{
 		PokemonID:   pokemon.PokemonID,
 		Form:        form,
+		Costume:     pokemon.Costume,
 		IV:          iv,
 		CP:          cp,
 		Level:       level,
@@ -98,6 +100,9 @@ type PokemonMatcher struct {
 	PVPEvolutionDirectTracking bool
 	StrictLocations            bool
 	AreaSecurityEnabled        bool
+	// IncludeMegaEvolution is the server default for rules with
+	// PVPRankingEvolution == 0: when true those rules also match mega entries.
+	IncludeMegaEvolution bool
 }
 
 // Match returns all matched users for a pokemon along with the geofence
@@ -177,7 +182,7 @@ func (m *PokemonMatcher) matchMonsters(
 	var results []*db.MonsterTracking
 	for _, monster := range monsters {
 		// Pokemon ID check
-		if !(monster.PokemonID == targetPokemonID || (includeEverything && monster.PokemonID == 0)) {
+		if monster.PokemonID != targetPokemonID && (!includeEverything || monster.PokemonID != 0) {
 			continue
 		}
 		// Form check (0 = any).
@@ -190,8 +195,28 @@ func (m *PokemonMatcher) matchMonsters(
 		if monster.Form != 0 && monster.Form != formToCheck {
 			continue
 		}
+		// Costume check: 9000 = any; any other value (incl. 0 = no costume) is exact.
+		if monster.Costume != 9000 && monster.Costume != data.Costume {
+			continue
+		}
 		// PVP league filters
 		if league != 0 {
+			// Mega/temporary-evolution discriminator (parallel to the cap filter).
+			switch monster.PVPRankingEvolution {
+			case 0:
+				// "without mega": base only, unless the server default includes megas.
+				if !m.IncludeMegaEvolution && leagueData.Evolution != 0 {
+					continue
+				}
+			case 1:
+				if leagueData.Evolution == 0 { // any mega
+					continue
+				}
+			default:
+				if leagueData.Evolution != monster.PVPRankingEvolution { // specific mega (2=X,3=Y)
+					continue
+				}
+			}
 			if leagueData.Rank > monster.PVPRankingWorst {
 				continue
 			}

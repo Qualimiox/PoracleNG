@@ -16,27 +16,16 @@ import (
 // !help <command> renders the "help" DTS template with id=<command>.
 type HelpCommand struct{}
 
-// adminOnlyHelpTopics — non-admins asking "!help enable" get the 🙅
-// unknown-topic reply rather than the admin command surface.
-var adminOnlyHelpTopics = map[string]bool{
-	"enable":         true,
-	"disable":        true,
-	"broadcast":      true,
-	"userlist":       true,
-	"community":      true,
-	"apply":          true,
-	"backup":         true,
-	"restore":        true,
-	"poracle-admin":  true,
-	"pa":             true,
-}
+// The canonical admin-only topic set lives in the bot package so the slash
+// autocomplete can honour it too — it cannot import this package (commands
+// already imports discordbot/slash, so the reverse edge would be a cycle).
 
 func (c *HelpCommand) Name() string      { return "cmd.help" }
 func (c *HelpCommand) Aliases() []string { return nil }
 
 func (c *HelpCommand) Run(ctx *bot.CommandContext, args []string) []bot.Reply {
 	prefix := bot.CommandPrefix(ctx)
-	platform := strings.SplitN(ctx.TargetType, ":", 2)[0]
+	platform, _, _ := strings.Cut(ctx.TargetType, ":")
 	if platform == bot.TypeWebhook {
 		platform = "discord"
 	}
@@ -48,7 +37,7 @@ func (c *HelpCommand) Run(ctx *bot.CommandContext, args []string) []bot.Reply {
 
 	if len(args) > 0 {
 		topic := strings.ToLower(args[0])
-		if adminOnlyHelpTopics[topic] && !ctx.IsAdmin {
+		if bot.IsAdminOnlyHelpTopic(topic) && !ctx.IsAdmin {
 			tr := ctx.Tr()
 			return []bot.Reply{{React: "🙅", Text: tr.Tf("msg.help.unknown_topic", topic, prefix)}}
 		}
@@ -75,26 +64,6 @@ func (c *HelpCommand) Run(ctx *bot.CommandContext, args []string) []bot.Reply {
 		}
 	}
 	return c.renderHelpTemplate(ctx, "greeting", "", platform, view)
-}
-
-// helpEffectiveLanguage resolves the language to use for help template
-// lookups. Priority: language hint (from language-specific command
-// variants like !dasporacle) → ctx.Language → server default locale.
-// Without the default-locale fallback, operators whose custom help has
-// an explicit language: "en" would lose to the shipped readonly
-// fallback for any caller with ctx.Language == "" (unregistered users,
-// users who never ran !language).
-func helpEffectiveLanguage(ctx *bot.CommandContext) string {
-	if hint := ctx.GetLanguageHint(); hint != "" {
-		return hint
-	}
-	if ctx.Language != "" {
-		return ctx.Language
-	}
-	if ctx.Config != nil && ctx.Config.General.Locale != "" {
-		return ctx.Config.General.Locale
-	}
-	return "en"
 }
 
 func (c *HelpCommand) renderHelpTemplate(ctx *bot.CommandContext, templateType, templateID, platform string, view map[string]any) []bot.Reply {

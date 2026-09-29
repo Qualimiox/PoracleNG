@@ -139,6 +139,47 @@ func TestRaidMapperAllOptions(t *testing.T) {
 	}
 }
 
+func TestRaidMapperLocationAreas(t *testing.T) {
+	tokens, err := Raid([]*discordgo.ApplicationCommandInteractionDataOption{
+		sopt("boss", "mewtwo"),
+		sopt("location", "Work"),
+		sopt("areas", "london"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"mewtwo", "location:Work", "area:london"}
+	if !reflect.DeepEqual(tokens, want) {
+		t.Errorf("tokens=%v want %v", tokens, want)
+	}
+}
+
+func TestRaidMapper_Costume(t *testing.T) {
+	tokens, err := Raid([]*discordgo.ApplicationCommandInteractionDataOption{
+		{Name: "boss", Type: discordgo.ApplicationCommandOptionString, Value: "pikachu"},
+		{Name: "costume", Type: discordgo.ApplicationCommandOptionString, Value: "1"},
+	})
+	if err != nil {
+		t.Fatalf("Raid mapper error: %v", err)
+	}
+	if !reflect.DeepEqual(tokens, []string{"pikachu", "costume:1"}) {
+		t.Errorf("tokens=%v, want [pikachu costume:1]", tokens)
+	}
+}
+
+func TestRaidMapper_Form(t *testing.T) {
+	tokens, err := Raid([]*discordgo.ApplicationCommandInteractionDataOption{
+		{Name: "boss", Type: discordgo.ApplicationCommandOptionString, Value: "pikachu"},
+		{Name: "form", Type: discordgo.ApplicationCommandOptionString, Value: "alolan"},
+	})
+	if err != nil {
+		t.Fatalf("Raid mapper error: %v", err)
+	}
+	if !reflect.DeepEqual(tokens, []string{"pikachu", "form:alolan"}) {
+		t.Errorf("tokens=%v, want [pikachu form:alolan]", tokens)
+	}
+}
+
 func TestLookupRaid(t *testing.T) {
 	if Lookup("raid") == nil {
 		t.Fatal("nil mapper for /raid")

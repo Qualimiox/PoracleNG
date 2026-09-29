@@ -67,18 +67,19 @@ type Enricher struct {
 	ForecastProvider   ForecastProvider  // optional; triggers AccuWeather fetch
 	ShinyProvider      ShinyRateProvider // optional; provides shiny rates
 	EventChecker       *PogoEventChecker
-	GameData           *gamedata.GameData  // game master data for enrichment
-	Translations       *i18n.Bundle        // translations for per-language enrichment
-	MapConfig          *MapConfig          // map URL configuration
-	IvColors           []string            // Discord IV color hex strings (6 thresholds)
-	PVPDisplay         *PVPDisplayConfig   // PVP display filtering config
-	ImgUicons          *uicons.Uicons      // Primary icon resolver
-	ImgUiconsAlt       *uicons.Uicons      // Alternative icon resolver
-	StickerUicons      *uicons.Uicons      // Sticker icon resolver (webp)
-	DefaultLocale      string              // Fallback locale when user has no language set
-	RequestShinyImages bool                // Whether to request shiny icon variants
-	StaticMap          *staticmap.Resolver // Static map tile resolver (nil = disabled)
-	Geocoder           *geocoding.Geocoder // Reverse geocoder (nil = disabled)
+	GameData           *gamedata.GameData      // game master data for enrichment
+	Translations       *i18n.Bundle            // translations for per-language enrichment
+	MapConfig          *MapConfig              // map URL configuration
+	IvColors           []string                // Discord IV color hex strings (6 thresholds)
+	PVPDisplay         *PVPDisplayConfig       // PVP display filtering config
+	ImgUicons          *uicons.Uicons          // Primary icon resolver
+	ImgUiconsAlt       *uicons.Uicons          // Alternative icon resolver
+	StickerUicons      *uicons.Uicons          // Sticker icon resolver (webp)
+	DefaultLocale      string                  // Fallback locale when user has no language set
+	RequestShinyImages bool                    // Whether to request shiny icon variants
+	StaticMap          *staticmap.Resolver     // Static map tile resolver (nil = disabled)
+	Geocoder           *geocoding.Geocoder     // Reverse geocoder (nil = disabled)
+	Intersection       *geocoding.Intersection // Nearest street intersection lookup (nil = disabled)
 
 	// Fallback icon URLs when uicons are not configured or fail
 	FallbackImgURL      string
@@ -212,6 +213,27 @@ func (e *Enricher) addAddressFields(m map[string]any, addr *geocoding.Address) {
 	m["formattedAddress"] = addr.FormattedAddress
 }
 
+// addIntersection populates the {{intersection}} field with the nearest street
+// intersection ("Street1 & Street2"), or "" when unavailable. No-op when the
+// feature is disabled. Results are cache-backed (shared geocoder pogreb DB),
+// so repeat sightings at a fixed stop don't re-hit GeoNames.
+func (e *Enricher) addIntersection(m map[string]any, lat, lon float64) {
+	if e.Intersection == nil {
+		return
+	}
+	m["intersection"] = e.Intersection.GetIntersection(lat, lon)
+}
+
+// addLocationFields populates the geocoding-derived location fields (reverse-
+// geocoded address + nearest street intersection) for a coordinate. Every
+// webhook type funnels through here, so adding a future location field — or
+// adding a new enrichment type — only touches one place instead of every
+// call site. Both sub-steps are no-ops when their provider is disabled.
+func (e *Enricher) addLocationFields(m map[string]any, lat, lon float64) {
+	e.addGeoResult(m, lat, lon)
+	e.addIntersection(m, lat, lon)
+}
+
 // Tile mode constants. Defined here to avoid import cycles with cmd/processor.
 const (
 	TileModeSkip         = 0 // no template uses staticMap → don't generate tile
@@ -226,7 +248,7 @@ const (
 // directly and returns nil.
 // tileMode controls whether to skip (0), generate inline bytes (1), or generate
 // a fetchable URL (2).
-func (e *Enricher) addStaticMap(m map[string]any, maptype string, lat, lon float64, webhookFields map[string]any, tileMode int) *staticmap.TilePending {
+func (e *Enricher) addStaticMap(m map[string]any, maptype string, lat, lon float64, webhookFields map[string]any, tileMode int, ref string) *staticmap.TilePending {
 	if e.StaticMap == nil || tileMode == TileModeSkip {
 		return nil
 	}
@@ -258,8 +280,8 @@ func (e *Enricher) addStaticMap(m map[string]any, maptype string, lat, lon float
 		// Inline mode POSTs without pregenerate=true — the tileserver returns
 		// image bytes directly. Assumes tileservercache with POST-body support.
 		filtered := filterFields(merged, pregenKeys)
-		e.StaticMap.AddNearbyStops(filtered, merged, maptype)
-		return e.StaticMap.SubmitTileInline(maptype, filtered, e.StaticMap.GetStaticMapType(maptype), m)
+		e.StaticMap.AddNearbyStops(filtered, merged, maptype, ref)
+		return e.StaticMap.SubmitTileInline(maptype, filtered, e.StaticMap.GetStaticMapType(maptype), m, ref)
 	}
 
 	if tileMode == TileModeURLWithBytes {
@@ -268,12 +290,12 @@ func (e *Enricher) addStaticMap(m map[string]any, maptype string, lat, lon float
 		// the bytes once via internal_url so Discord-upload destinations in
 		// the same batch don't each re-fetch the public URL.
 		filtered := filterFields(merged, pregenKeys)
-		e.StaticMap.AddNearbyStops(filtered, merged, maptype)
-		return e.StaticMap.SubmitTileBoth(maptype, filtered, e.StaticMap.GetStaticMapType(maptype), m)
+		e.StaticMap.AddNearbyStops(filtered, merged, maptype, ref)
+		return e.StaticMap.SubmitTileBoth(maptype, filtered, e.StaticMap.GetStaticMapType(maptype), m, ref)
 	}
 
 	// TileModeURL — current flow
-	url, pending := e.StaticMap.GetStaticMapURLAsync(maptype, merged, keys, pregenKeys, m)
+	url, pending := e.StaticMap.GetStaticMapURLAsync(maptype, merged, keys, pregenKeys, m, ref)
 	if pending != nil {
 		// Tile will be resolved async by the sender
 		return pending

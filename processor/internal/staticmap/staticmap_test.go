@@ -2,11 +2,12 @@ package staticmap
 
 import (
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
-
-func boolPtr(v bool) *bool { return &v }
 
 func TestLimits(t *testing.T) {
 	// Test the Web Mercator bounds calculation at a known location
@@ -151,7 +152,7 @@ func TestGetConfigForTileType(t *testing.T) {
 	r := New(Config{
 		Provider: "tileservercache",
 		TileserverSettings: map[string]TileTypeConfig{
-			"default": {Type: "staticMap", Width: 600, Height: 300, Zoom: 14, Pregenerate: boolPtr(true)},
+			"default": {Type: "staticMap", Width: 600, Height: 300, Zoom: 14, Pregenerate: new(true)},
 			"raid":    {Width: 800, Height: 400},
 		},
 	})
@@ -248,11 +249,11 @@ func TestRampardosProviderAliasesTileserverCache(t *testing.T) {
 				Provider:    provider,
 				ProviderURL: "https://tiles.example.com",
 				TileserverSettings: map[string]TileTypeConfig{
-					"default": {Type: "staticMap", Pregenerate: boolPtr(true)},
+					"default": {Type: "staticMap", Pregenerate: new(true)},
 				},
 			})
 			target := map[string]any{}
-			url, pending := r.GetStaticMapURLAsync("monster", map[string]any{"latitude": 51.28, "longitude": 1.08}, nil, nil, target)
+			url, pending := r.GetStaticMapURLAsync("monster", map[string]any{"latitude": 51.28, "longitude": 1.08}, nil, nil, target, "")
 			if pending == nil {
 				t.Fatalf("provider %q: expected pregen pending, got nil (provider was treated as instant)", provider)
 			}
@@ -297,31 +298,41 @@ func TestGetTileURLMulti(t *testing.T) {
 }
 
 func TestCircuitBreaker(t *testing.T) {
+	// Tileserver that always fails; after the failure threshold the breaker
+	// should open and stop hitting it.
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
 	r := New(Config{
 		Provider:                   "tileservercache",
-		ProviderURL:                "https://tiles.example.com",
+		ProviderURL:                srv.URL,
 		TileserverFailureThreshold: 3,
-		TileserverCooldownMs:       100, // short for testing
+		TileserverCooldownMs:       60000, // long so the circuit stays open in-test
 	})
 
-	// Record errors to open circuit
-	r.recordError()
-	r.recordError()
-	r.recordError()
-
-	r.mu.Lock()
-	if r.consecutiveErrors < 3 {
-		t.Errorf("expected >= 3 consecutive errors, got %d", r.consecutiveErrors)
+	// Three failing POSTs trip the breaker.
+	for i := range 3 {
+		if got := r.GetPregeneratedTileURL("monster", map[string]any{}, "staticMap"); got != "" {
+			t.Fatalf("call %d: expected empty on tileserver 500, got %q", i, got)
+		}
 	}
-	if r.circuitOpenSince.IsZero() {
-		t.Error("expected circuit to be open")
+	hits := calls.Load()
+	if hits != 3 {
+		t.Fatalf("expected 3 tileserver hits before open, got %d", hits)
 	}
-	r.mu.Unlock()
 
-	// Pregenerate should return empty during cooldown
-	result := r.GetPregeneratedTileURL("monster", map[string]any{}, "staticMap")
-	if result != "" {
-		t.Errorf("expected empty during circuit break, got %q", result)
+	// Further calls are short-circuited — the tileserver is not contacted.
+	for range 3 {
+		if got := r.GetPregeneratedTileURL("monster", map[string]any{}, "staticMap"); got != "" {
+			t.Fatalf("expected empty during circuit break, got %q", got)
+		}
+	}
+	if extra := calls.Load() - hits; extra != 0 {
+		t.Errorf("circuit open but tileserver hit %d more times", extra)
 	}
 }
 

@@ -37,15 +37,14 @@ var supportedSummaryAlertTypes = map[string]bool{
 
 func (c *SummaryCommand) Run(ctx *bot.CommandContext, args []string) []bot.Reply {
 	tr := ctx.Tr()
-	prefix := bot.CommandPrefix(ctx)
 
 	if ctx.SummarySchedules == nil {
 		// Feature flag off: no store wired.
-		return []bot.Reply{{React: "🙅", Text: tr.Tf("msg.summary.usage", prefix)}}
+		return []bot.Reply{{React: "🙅", Text: inlineUsage(ctx, "msg.summary.usage")}}
 	}
 
 	if len(args) == 0 {
-		return []bot.Reply{{React: "🙅", Text: tr.Tf("msg.summary.usage", prefix)}}
+		return []bot.Reply{{React: "🙅", Text: inlineUsage(ctx, "msg.summary.usage")}}
 	}
 
 	// First positional arg = alertType. Remaining args = subcommand + body.
@@ -53,7 +52,7 @@ func (c *SummaryCommand) Run(ctx *bot.CommandContext, args []string) []bot.Reply
 	rest := args[1:]
 
 	if !supportedSummaryAlertTypes[alertType] {
-		return []bot.Reply{{React: "🙅", Text: tr.Tf("msg.summary.usage", prefix)}}
+		return []bot.Reply{{React: "🙅", Text: inlineUsage(ctx, "msg.summary.usage")}}
 	}
 
 	// No subcommand → show status.
@@ -77,7 +76,7 @@ func (c *SummaryCommand) Run(ctx *bot.CommandContext, args []string) []bot.Reply
 	case matchSub("arg.now"):
 		return c.now(ctx, alertType)
 	default:
-		return []bot.Reply{{React: "🙅", Text: tr.Tf("msg.summary.usage", prefix)}}
+		return []bot.Reply{{React: "🙅", Text: inlineUsage(ctx, "msg.summary.usage")}}
 	}
 }
 
@@ -141,24 +140,21 @@ func timezoneAnnotation(ctx *bot.CommandContext, _alertType string) string {
 // settime parser so users see one syntax across the bot.
 func (c *SummaryCommand) setTime(ctx *bot.CommandContext, alertType string, args []string) []bot.Reply {
 	tr := ctx.Tr()
-	prefix := bot.CommandPrefix(ctx)
 
 	if len(args) == 0 {
-		return []bot.Reply{{React: "🙅", Text: tr.Tf("msg.summary.usage", prefix)}}
+		return []bot.Reply{{React: "🙅", Text: inlineUsage(ctx, "msg.summary.usage")}}
 	}
 
 	dayPrefixes := buildDayPrefixMap(ctx)
-	var entries []db.ActiveHourEntry
-	for _, arg := range args {
-		parsed, err := ParseSettimeArg(arg, dayPrefixes)
-		if err != nil {
-			return []bot.Reply{{React: "🙅", Text: tr.Tf("msg.summary.settime_invalid", arg, SettimeErrorMessage(tr, err))}}
-		}
-		entries = append(entries, parsed...)
+	// Accepts several specs in one go, comma- or space-separated:
+	// the slash surface sends the whole `times` option as one token.
+	entries, err := ParseSettimeArgs(args, dayPrefixes)
+	if err != nil {
+		return []bot.Reply{{React: "🙅", Text: tr.Tf("msg.summary.settime_invalid", strings.Join(args, " "), SettimeErrorMessage(tr, err))}}
 	}
 
 	if len(entries) == 0 {
-		return []bot.Reply{{React: "🙅", Text: tr.Tf("msg.summary.usage", prefix)}}
+		return []bot.Reply{{React: "🙅", Text: inlineUsage(ctx, "msg.summary.usage")}}
 	}
 
 	data, err := json.Marshal(entries)
@@ -211,4 +207,3 @@ func (c *SummaryCommand) now(ctx *bot.CommandContext, alertType string) []bot.Re
 	}
 	return []bot.Reply{{React: "✅", Text: tr.Tf("msg.summary.delivered", alertType)}}
 }
-

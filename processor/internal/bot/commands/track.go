@@ -9,6 +9,7 @@ import (
 
 	"github.com/pokemon/poracleng/processor/internal/bot"
 	"github.com/pokemon/poracleng/processor/internal/db"
+	"github.com/pokemon/poracleng/processor/internal/gamedata"
 	"github.com/pokemon/poracleng/processor/internal/store"
 )
 
@@ -68,12 +69,31 @@ func (c *TrackCommand) Run(ctx *bot.CommandContext, args []string) []bot.Reply {
 		return []bot.Reply{*formReply}
 	}
 
+	// Resolve costume filter: 9000 = any (default when the arg is absent),
+	// 0 = no costume, N = specific costume. Mirrors applyFormFilter's
+	// not-found path for an unresolved name.
+	costume := 9000
+	if costumeArg, ok := parsed.Strings["costume"]; ok {
+		id, resolved := ctx.ArgMatcher.ResolveCostume(costumeArg, ctx.Language)
+		if !resolved {
+			return []bot.Reply{{
+				React: "🙅",
+				Text: tr.Tf("msg.costume_not_found",
+					ctx.EscapeForCode(costumeArg),
+					bot.CommandPrefix(ctx)),
+			}}
+		}
+		costume = id
+	}
+
 	// Reject bare "!track everything" with no meaningful filters for non-admins.
-	// Filters like IV, CP, level, PVP league, type, or gender meaningfully narrow results.
-	// "shiny" alone doesn't — almost everything can be shiny.
+	// Filters like IV, CP, level, PVP league, type, gender, or costume
+	// meaningfully narrow results. "shiny" alone doesn't — almost everything
+	// can be shiny.
 	if parsed.HasKeyword("arg.everything") && !ctx.IsAdmin {
-		hasFilters := len(parsed.Singles) > 0 || len(parsed.Ranges) > 0 ||
-			len(parsed.Types) > 0 || parsed.Gender != 0 || len(parsed.PVP) > 0
+		hasFilters := len(parsed.Singles) > 0 || narrowingRanges(parsed.Ranges) ||
+			len(parsed.Types) > 0 || parsed.Gender != 0 || len(parsed.PVP) > 0 ||
+			costume != 9000
 		if !hasFilters {
 			return []bot.Reply{{React: "🙅", Text: tr.T("msg.track.everything_no_filters")}}
 		}
@@ -124,6 +144,12 @@ func (c *TrackCommand) Run(ctx *bot.CommandContext, args []string) []bot.Reply {
 		}
 	}
 
+	// Validate per-rule location:/area: overrides.
+	override, overrideReply := parseOverride(ctx, parsed.Strings["location"], parsed.StringLists["area"], filters.distance)
+	if overrideReply != nil {
+		return []bot.Reply{*overrideReply}
+	}
+
 	// If min_iv is still default (-1) but other IV-related filters are set, default to 0
 	if filters.minIV == -1 && (filters.minCP > 0 || filters.minLevel > 0 ||
 		filters.atk > 0 || filters.def > 0 || filters.sta > 0 ||
@@ -132,10 +158,13 @@ func (c *TrackCommand) Run(ctx *bot.CommandContext, args []string) []bot.Reply {
 	}
 
 	// Build insert structs — one per pokemon per PVP league
-	// If no PVP, one entry per pokemon with zeroed PVP fields
+	// If no PVP, one entry per pokemon with no PVP league. Best/Worst use the
+	// no-constraint rank defaults (1 / 4096) so non-PVP rows match the DB column
+	// defaults and the API (a zero-value entry would store 0/0, breaking dedup
+	// parity with API-created rows and surfacing 0/0 instead of null in the v2 API).
 	pvpList := pvpEntries
 	if len(pvpList) == 0 {
-		pvpList = []pvpEntry{{}} // single entry with zero PVP
+		pvpList = []pvpEntry{{Best: 1, Worst: 4096}} // single entry, no PVP league
 	}
 	insert := make([]db.MonsterTrackingAPI, 0, len(monsterList)*len(pvpList))
 	for _, mon := range monsterList {
@@ -145,6 +174,7 @@ func (c *TrackCommand) Run(ctx *bot.CommandContext, args []string) []bot.Reply {
 				ProfileNo: ctx.ProfileNo,
 				PokemonID: mon.PokemonID,
 				Form:      mon.Form,
+				Costume:   costume,
 				Ping:      pings,
 				Distance:  filters.distance,
 				MinIV:     filters.minIV,
@@ -167,20 +197,23 @@ func (c *TrackCommand) Run(ctx *bot.CommandContext, args []string) []bot.Reply {
 				// rules matching every pokemon regardless of weight,
 				// insert the matcher-no-op range explicitly: MaxWeight 0
 				// would otherwise reject every encountered pokemon.
-				MinWeight:        0,
-				MaxWeight:        9000000,
-				MinTime:          filters.minTime,
-				Rarity:           filters.rarity,
-				MaxRarity:        filters.maxRarity,
-				Size:             filters.size,
-				MaxSize:          filters.maxSize,
-				Template:         filters.template,
-				Clean:            filters.clean,
-				PVPRankingLeague: pe.League,
-				PVPRankingBest:   pe.Best,
-				PVPRankingWorst:  pe.Worst,
-				PVPRankingMinCP:  pe.MinCP,
-				PVPRankingCap:    pe.Cap,
+				MinWeight:             0,
+				MaxWeight:             9000000,
+				MinTime:               filters.minTime,
+				Rarity:                filters.rarity,
+				MaxRarity:             filters.maxRarity,
+				Size:                  filters.size,
+				MaxSize:               filters.maxSize,
+				Template:              filters.template,
+				Clean:                 filters.clean,
+				PVPRankingLeague:      pe.League,
+				PVPRankingBest:        pe.Best,
+				PVPRankingWorst:       pe.Worst,
+				PVPRankingMinCP:       pe.MinCP,
+				PVPRankingCap:         pe.Cap,
+				PVPRankingEvolution:   pe.Evolution,
+				OverrideLocationLabel: override.LocationLabel,
+				OverrideAreas:         override.Areas,
 			})
 		}
 	}
@@ -204,25 +237,44 @@ func (c *TrackCommand) Run(ctx *bot.CommandContext, args []string) []bot.Reply {
 	}
 
 	// Build response
-	message := buildTrackingMessage(tr, ctx, len(diff.AlreadyPresent), len(diff.Updates), len(diff.Inserts),
+	var message strings.Builder
+	message.WriteString(buildTrackingMessage(tr, ctx, len(diff.AlreadyPresent), len(diff.Updates), len(diff.Inserts),
 		func(i int) string {
 			return ctx.RowText.MonsterRowText(tr, monsterAPIToTracking(&diff.AlreadyPresent[i]))
 		},
 		func(i int) string { return ctx.RowText.MonsterRowText(tr, monsterAPIToTracking(&diff.Updates[i])) },
 		func(i int) string { return ctx.RowText.MonsterRowText(tr, monsterAPIToTracking(&diff.Inserts[i])) },
-	)
+	))
 
 	ctx.TriggerReload()
 
-	message += trackingWarnings(ctx, filters.distance)
+	message.WriteString(trackingWarnings(ctx, filters.distance))
 	if templateWarn != "" {
-		message += "\n⚠️ " + templateWarn
+		message.WriteString("\n⚠️ " + templateWarn)
+	}
+
+	// Warn if a specific mega form (mega:x / mega:y) targets a species that
+	// has no such temporary evolution — the rule could never match.
+	if specificEvo := specificMegaEvo(pvpEntries); specificEvo != 0 && ctx.GameData != nil {
+		formLabel := tr.T("tracking.mega_x_label")
+		if specificEvo == 3 {
+			formLabel = tr.T("tracking.mega_y_label")
+		}
+		for _, mon := range monsterList {
+			if mon.PokemonID == 0 {
+				continue // "everything" catch-all — skip
+			}
+			if !speciesHasTempEvo(ctx.GameData, mon.PokemonID, specificEvo) {
+				name := gamedata.PokemonName(tr, mon.PokemonID)
+				message.WriteString("\n" + tr.Tf("msg.track.no_mega_form", name, formLabel))
+			}
+		}
 	}
 
 	if len(diff.Inserts) == 0 && len(diff.Updates) == 0 {
-		return []bot.Reply{{React: "👌", Text: message}}
+		return []bot.Reply{{React: "👌", Text: message.String()}}
 	}
-	return []bot.Reply{{React: "✅", Text: message}}
+	return []bot.Reply{{React: "✅", Text: message.String()}}
 }
 
 // trackParams builds the parameter list, conditionally including everything/individually.
@@ -256,8 +308,13 @@ func trackParams(ctx *bot.CommandContext) []bot.ParamDef {
 		{Type: bot.ParamPrefixSingle, Key: "arg.prefix.t"},
 		{Type: bot.ParamPrefixSingle, Key: "arg.prefix.gen"},
 		{Type: bot.ParamPrefixSingle, Key: "arg.prefix.cap"},
+		{Type: bot.ParamPrefixString, Key: "arg.prefix.mega"},
+		{Type: bot.ParamKeyword, Key: "arg.mega"},
 		{Type: bot.ParamPrefixString, Key: "arg.prefix.form"},
+		{Type: bot.ParamPrefixString, Key: "arg.prefix.costume"},
 		{Type: bot.ParamPrefixString, Key: "arg.prefix.template"},
+		{Type: bot.ParamPrefixString, Key: "arg.prefix.location"},
+		{Type: bot.ParamPrefixStringList, Key: "arg.prefix.area"},
 		{Type: bot.ParamKeyword, Key: "arg.remove"},
 		{Type: bot.ParamKeyword, Key: "arg.clean"},
 		{Type: bot.ParamKeyword, Key: "arg.shiny"},
@@ -332,7 +389,7 @@ func (c *TrackCommand) parseFilters(ctx *bot.CommandContext, parsed *bot.ParsedA
 	if d, ok := parsed.Singles["d"]; ok {
 		f.distance = d
 	}
-	f.distance = enforceDistance(ctx, f.distance)
+	f.distance = enforceDistance(ctx, f.distance, len(parsed.StringLists["area"]) > 0)
 
 	// Template
 	if t, ok := parsed.Strings["template"]; ok {
@@ -465,11 +522,12 @@ func (c *TrackCommand) parseFilters(ctx *bot.CommandContext, parsed *bot.ParsedA
 
 // pvpEntry holds resolved PVP parameters for a single league.
 type pvpEntry struct {
-	League int // CP cap: 500, 1500, 2500
-	Best   int
-	Worst  int
-	MinCP  int
-	Cap    int
+	League    int // CP cap: 500, 1500, 2500
+	Best      int
+	Worst     int
+	MinCP     int
+	Cap       int
+	Evolution int // 0 base, 1 any mega, 2 Mega X, 3 Mega Y
 }
 
 // parsePVP resolves all PVP league parameters from parsed args.
@@ -489,6 +547,21 @@ func (c *TrackCommand) parsePVP(ctx *bot.CommandContext, parsed *bot.ParsedArgs)
 	cap := 0
 	if v, ok := parsed.Singles["cap"]; ok {
 		cap = v
+	}
+
+	megaEvo := 0
+	if v, ok := parsed.Strings["mega"]; ok {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "", "1":
+			megaEvo = 1
+		case "x":
+			megaEvo = 2
+		case "y":
+			megaEvo = 3
+		}
+	}
+	if megaEvo == 0 && parsed.HasKeyword("arg.mega") {
+		megaEvo = 1
 	}
 
 	var entries []pvpEntry
@@ -525,11 +598,12 @@ func (c *TrackCommand) parsePVP(ctx *bot.CommandContext, parsed *bot.ParsedArgs)
 		}
 
 		entries = append(entries, pvpEntry{
-			League: l.cp,
-			Best:   best,
-			Worst:  worst,
-			MinCP:  minCP,
-			Cap:    cap,
+			League:    l.cp,
+			Best:      best,
+			Worst:     worst,
+			MinCP:     minCP,
+			Cap:       cap,
+			Evolution: megaEvo,
 		})
 	}
 
@@ -569,4 +643,70 @@ func (c *TrackCommand) resolveMonsters(ctx *bot.CommandContext, parsed *bot.Pars
 		return nil, reply
 	}
 	return filterByGenAndType(ctx, monsters, parsed), nil
+}
+
+// specificMegaEvo returns the Evolution ID (2=Mega X, 3=Mega Y) if ALL pvp
+// entries request the same specific mega variant, or 0 otherwise (includes
+// bare mega=1 and mixed variants).
+func specificMegaEvo(entries []pvpEntry) int {
+	for _, e := range entries {
+		if e.Evolution == 2 || e.Evolution == 3 {
+			return e.Evolution
+		}
+	}
+	return 0
+}
+
+// speciesHasTempEvo reports whether a species (form 0) has a temporary
+// evolution with the given tempEvoID in the game master data.
+func speciesHasTempEvo(gd *gamedata.GameData, pokemonID, tempEvoID int) bool {
+	mon := gd.GetMonster(pokemonID, 0)
+	if mon == nil {
+		return false
+	}
+	for _, te := range mon.TempEvolutions {
+		if te.TempEvoID == tempEvoID {
+			return true
+		}
+	}
+	return false
+}
+
+// modalClass names the class that holds the bulk of spawns for each class-style
+// range filter. A filter still admitting that class narrows almost nothing.
+var modalClass = map[string]int{
+	"size":   3, // M
+	"rarity": 1, // Common
+}
+
+// narrowingRanges reports whether any range filter meaningfully narrows the
+// candidate set, for the non-admin "everything" guard.
+//
+// Most ranges (iv, cp, level, atk/def/sta) narrow by construction. size and
+// rarity do not: both are class filters that resolve to an EXACT match when no
+// max is given (see applyFilters), and their modal class carries most spawns —
+// so `everything size:m` or `everything rarity:common` cleared the guard while
+// subscribing to very nearly every spawn, which is the outcome the guard exists
+// to prevent. A class range that EXCLUDES the modal class does narrow, and
+// still counts: "any species but only XXL" is both reasonable and small.
+//
+// Became reachable in two clicks from the slash UI once /track emitted a real
+// size: token (#238); before that the bare token aborted the command and the
+// guard was never reached.
+func narrowingRanges(ranges map[string]bot.Range) bool {
+	for name, r := range ranges {
+		modal, isClass := modalClass[name]
+		if !isClass {
+			return true
+		}
+		// Absent max means an exact match on Min, mirroring applyFilters.
+		max := r.Min
+		if r.HasMax {
+			max = r.Max
+		}
+		if modal < r.Min || modal > max {
+			return true
+		}
+	}
+	return false
 }

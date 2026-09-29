@@ -6,11 +6,14 @@ import (
 	"testing"
 
 	"github.com/pokemon/poracleng/processor/internal/bot"
+	"github.com/pokemon/poracleng/processor/internal/config"
 	"github.com/pokemon/poracleng/processor/internal/db"
 	"github.com/pokemon/poracleng/processor/internal/discordbot/slash/autocomplete"
 	"github.com/pokemon/poracleng/processor/internal/gamedata"
+	"github.com/pokemon/poracleng/processor/internal/geofence"
 	"github.com/pokemon/poracleng/processor/internal/i18n"
 	"github.com/pokemon/poracleng/processor/internal/rowtext"
+	"github.com/pokemon/poracleng/processor/internal/state"
 	"github.com/pokemon/poracleng/processor/internal/store"
 )
 
@@ -109,6 +112,20 @@ func TestListTracking_Raid(t *testing.T) {
 	}
 	if rule.Value != itoa(want.UID) {
 		t.Errorf("value=%q want %q", rule.Value, itoa(want.UID))
+	}
+}
+
+// TestToRaidTracking_PreservesCostume ensures the local toRaidTracking
+// converter copies Costume from RaidTrackingAPI through to RaidTracking.
+// Without this, every raid rule rendered via /untrack raid autocomplete
+// descriptions would show Costume as Go-zero 0, and rowtext.RaidRowText
+// treats anything other than 9000 as a specific costume filter, so a rule
+// with no costume restriction (9000) would wrongly render "no costume".
+func TestToRaidTracking_PreservesCostume(t *testing.T) {
+	for _, c := range []int{9000, 0, 5} {
+		if got := toRaidTracking(&db.RaidTrackingAPI{Costume: c}); got.Costume != c {
+			t.Errorf("toRaidTracking dropped Costume: got %d want %d", got.Costume, c)
+		}
 	}
 }
 
@@ -247,6 +264,57 @@ func TestListAreas_UnregisteredUserNil(t *testing.T) {
 	}
 }
 
+func TestListUserLocationsIncludesDefault(t *testing.T) {
+	deps, humans, _, _ := testDeps(t)
+	humans.AddHuman(&store.Human{ID: "discord:user:42"})
+	// Seed one named location.
+	if _, err := deps.Humans.AddLocation(store.UserLocation{
+		ID: "discord:user:42", Label: "Home", Latitude: 51.5, Longitude: -0.1,
+	}); err != nil {
+		t.Fatalf("AddLocation: %v", err)
+	}
+
+	out, err := ListUserLocations(context.Background(), deps, "discord:user:42", autocomplete.UserStateHint{})
+	if err != nil {
+		t.Fatalf("ListUserLocations: %v", err)
+	}
+	// "default" must be the first entry.
+	if len(out) == 0 || out[0].Value != "default" {
+		t.Fatalf("expected 'default' as first choice, got %v", out)
+	}
+	if len(out) != 2 {
+		t.Fatalf("expected 2 choices (default + Home), got %d: %v", len(out), out)
+	}
+}
+
+func TestListUserLocationsDefaultFilteredByPartial(t *testing.T) {
+	deps, humans, _, _ := testDeps(t)
+	humans.AddHuman(&store.Human{ID: "discord:user:42"})
+
+	// partial "def" should match "default".
+	out, err := ListUserLocations(context.Background(), deps, "discord:user:42", autocomplete.UserStateHint{Focused: "def"})
+	if err != nil {
+		t.Fatalf("ListUserLocations: %v", err)
+	}
+	if len(out) != 1 || out[0].Value != "default" {
+		t.Errorf("partial 'def' should match 'default', got %v", out)
+	}
+}
+
+func TestListUserLocationsDefaultNotInTrackerContext(t *testing.T) {
+	// partial "xyz" should not match "default", returning nil (no choices).
+	deps, humans, _, _ := testDeps(t)
+	humans.AddHuman(&store.Human{ID: "discord:user:42"})
+
+	out, err := ListUserLocations(context.Background(), deps, "discord:user:42", autocomplete.UserStateHint{Focused: "xyz"})
+	if err != nil {
+		t.Fatalf("ListUserLocations: %v", err)
+	}
+	if len(out) != 0 {
+		t.Errorf("partial 'xyz' should produce no matches, got %v", out)
+	}
+}
+
 func TestListProfiles(t *testing.T) {
 	deps, humans, _, _ := testDeps(t)
 	humans.AddHuman(&store.Human{ID: "discord:user:42"})
@@ -293,4 +361,89 @@ func itoa(n int64) string {
 		buf[i] = '-'
 	}
 	return string(buf[i:])
+}
+
+// areaDeps extends testDeps with a state snapshot carrying user-selectable
+// fences plus the config AreaLogic needs.
+func areaDeps(t *testing.T) (*bot.BotDeps, *store.MockHumanStore) {
+	t.Helper()
+	deps, humans, _, _ := testDeps(t)
+	mgr := state.NewManager()
+	mgr.Set(&state.State{Fences: []geofence.Fence{
+		{Name: "London", UserSelectable: true},
+		{Name: "Paris", UserSelectable: true},
+		{Name: "Berlin", UserSelectable: true},
+		{Name: "Staff Only", UserSelectable: false},
+	}})
+	deps.StateMgr = mgr
+	deps.Cfg = &config.Config{}
+	return deps, humans
+}
+
+func TestListAddableAreasExcludesSelected(t *testing.T) {
+	deps, humans := areaDeps(t)
+	humans.AddHuman(&store.Human{ID: "discord:user:42", Area: []string{"london"}})
+
+	out, err := ListAddableAreas(context.Background(), deps, "discord:user:42", autocomplete.UserStateHint{})
+	if err != nil {
+		t.Fatalf("ListAddableAreas: %v", err)
+	}
+	got := map[string]bool{}
+	for _, c := range out {
+		got[c.Label] = true
+		if c.Label != c.Value {
+			t.Errorf("label/value mismatch: %q vs %q", c.Label, c.Value)
+		}
+	}
+	if got["London"] || got["london"] {
+		t.Errorf("already-selected area offered for add: %v", out)
+	}
+	if !got["Paris"] || !got["Berlin"] {
+		t.Errorf("missing addable areas: %v", out)
+	}
+	if got["Staff Only"] {
+		t.Errorf("non-user-selectable area offered to non-admin: %v", out)
+	}
+	if len(out) != 2 {
+		t.Fatalf("got %d choices, want 2: %v", len(out), out)
+	}
+}
+
+func TestListAddableAreasAdminSeesNonSelectable(t *testing.T) {
+	deps, humans := areaDeps(t)
+	humans.AddHuman(&store.Human{ID: "discord:user:42"})
+
+	out, err := ListAddableAreas(context.Background(), deps, "discord:user:42", autocomplete.UserStateHint{IsAdmin: true})
+	if err != nil {
+		t.Fatalf("ListAddableAreas: %v", err)
+	}
+	if len(out) != 4 {
+		t.Fatalf("got %d choices, want 4 (admin sees every fence): %v", len(out), out)
+	}
+}
+
+// The tracker `areas:` option is an override, not a narrowing of the user's
+// selected areas — parseOverride validates it against the full available
+// set, so the picker must offer that set, selected areas included.
+func TestListAvailableAreasIncludesSelected(t *testing.T) {
+	deps, humans := areaDeps(t)
+	humans.AddHuman(&store.Human{ID: "discord:user:42", Area: []string{"london"}})
+
+	out, err := ListAvailableAreas(context.Background(), deps, "discord:user:42", autocomplete.UserStateHint{})
+	if err != nil {
+		t.Fatalf("ListAvailableAreas: %v", err)
+	}
+	got := map[string]bool{}
+	for _, c := range out {
+		got[c.Label] = true
+	}
+	if !got["London"] || !got["Paris"] || !got["Berlin"] {
+		t.Errorf("want every user-selectable area, got %v", out)
+	}
+	if got["Staff Only"] {
+		t.Errorf("non-user-selectable area offered to non-admin: %v", out)
+	}
+	if len(out) != 3 {
+		t.Fatalf("got %d choices, want 3: %v", len(out), out)
+	}
 }

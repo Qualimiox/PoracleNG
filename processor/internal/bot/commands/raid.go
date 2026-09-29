@@ -25,8 +25,11 @@ var raidParams = []bot.ParamDef{
 	{Type: bot.ParamPrefixString, Key: "arg.prefix.template"},
 	{Type: bot.ParamPrefixString, Key: "arg.prefix.move"},
 	{Type: bot.ParamPrefixString, Key: "arg.prefix.form"},
+	{Type: bot.ParamPrefixString, Key: "arg.prefix.costume"},
 	{Type: bot.ParamPrefixString, Key: "arg.prefix.gym"},
 	{Type: bot.ParamPrefixSingle, Key: "arg.prefix.gen"},
+	{Type: bot.ParamPrefixString, Key: "arg.prefix.location"},
+	{Type: bot.ParamPrefixStringList, Key: "arg.prefix.area"},
 	{Type: bot.ParamKeyword, Key: "arg.remove"},
 	{Type: bot.ParamKeyword, Key: "arg.everything"},
 	{Type: bot.ParamKeyword, Key: "arg.clean"},
@@ -73,6 +76,12 @@ func (c *RaidCommand) Run(ctx *bot.CommandContext, args []string) []bot.Reply {
 	if block != nil {
 		return []bot.Reply{*block}
 	}
+
+	override, overrideReply := parseOverride(ctx, parsed.Strings["location"], parsed.StringLists["area"], common.Distance)
+	if overrideReply != nil {
+		return []bot.Reply{*overrideReply}
+	}
+
 	exclusive := parsed.HasKeyword("arg.ex")
 	team := parsed.Team
 
@@ -98,6 +107,16 @@ func (c *RaidCommand) Run(ctx *bot.CommandContext, args []string) []bot.Reply {
 		return c.removeRaids(ctx, parsed)
 	}
 
+	// Costume filter — 9000 = any (default), 0 = no costume, N = specific.
+	costume := 9000
+	if costumeArg, ok := parsed.Strings["costume"]; ok {
+		id, resolved := ctx.ArgMatcher.ResolveCostume(costumeArg, ctx.Language)
+		if !resolved {
+			return []bot.Reply{{React: "🙅", Text: tr.Tf("msg.costume_not_found", ctx.EscapeForCode(costumeArg), bot.CommandPrefix(ctx))}}
+		}
+		costume = id
+	}
+
 	// Optional `gym:<id-or-name>` argument pins the rule to a specific
 	// gym. Multi-word names need outer quotes (e.g. `"gym:Town Hall"`)
 	// so the bot parser keeps it as one token.
@@ -114,24 +133,31 @@ func (c *RaidCommand) Run(ctx *bot.CommandContext, args []string) []bot.Reply {
 	var insert []db.RaidTrackingAPI
 
 	if len(parsed.Pokemon) > 0 {
+		monsters, formReply := applyFormFilter(ctx, parsed.Pokemon, parsed)
+		if formReply != nil {
+			return []bot.Reply{*formReply}
+		}
 		// Track specific pokemon
-		for _, mon := range parsed.Pokemon {
+		for _, mon := range monsters {
 			insert = append(insert, db.RaidTrackingAPI{
-				ID:          ctx.TargetID,
-				ProfileNo:   ctx.ProfileNo,
-				Ping:        pings,
-				PokemonID:   mon.PokemonID,
-				Form:        mon.Form,
-				Level:       bot.WildcardID,
-				Team:        team,
-				Exclusive:   db.IntBool(exclusive),
-				Move:        move,
-				Evolution:   bot.WildcardID,
-				GymID:       gymID,
-				Distance:    common.Distance,
-				Template:    common.Template,
-				Clean:       common.Clean,
-				RSVPChanges: rsvpChanges,
+				ID:                    ctx.TargetID,
+				ProfileNo:             ctx.ProfileNo,
+				Ping:                  pings,
+				PokemonID:             mon.PokemonID,
+				Form:                  mon.Form,
+				Costume:               costume,
+				Level:                 bot.WildcardID,
+				Team:                  team,
+				Exclusive:             db.IntBool(exclusive),
+				Move:                  move,
+				Evolution:             bot.WildcardID,
+				GymID:                 gymID,
+				Distance:              common.Distance,
+				Template:              common.Template,
+				Clean:                 common.Clean,
+				RSVPChanges:           rsvpChanges,
+				OverrideLocationLabel: override.LocationLabel,
+				OverrideAreas:         override.Areas,
 			})
 		}
 	} else {
@@ -166,20 +192,23 @@ func (c *RaidCommand) Run(ctx *bot.CommandContext, args []string) []bot.Reply {
 
 		for lvl := range levelSet {
 			insert = append(insert, db.RaidTrackingAPI{
-				ID:          ctx.TargetID,
-				ProfileNo:   ctx.ProfileNo,
-				Ping:        pings,
-				PokemonID:   bot.WildcardID,
-				Level:       lvl,
-				Team:        team,
-				Exclusive:   db.IntBool(exclusive),
-				Move:        move,
-				Evolution:   bot.WildcardID,
-				GymID:       gymID,
-				Distance:    common.Distance,
-				Template:    common.Template,
-				Clean:       common.Clean,
-				RSVPChanges: rsvpChanges,
+				ID:                    ctx.TargetID,
+				ProfileNo:             ctx.ProfileNo,
+				Ping:                  pings,
+				PokemonID:             bot.WildcardID,
+				Costume:               costume,
+				Level:                 lvl,
+				Team:                  team,
+				Exclusive:             db.IntBool(exclusive),
+				Move:                  move,
+				Evolution:             bot.WildcardID,
+				GymID:                 gymID,
+				Distance:              common.Distance,
+				Template:              common.Template,
+				Clean:                 common.Clean,
+				RSVPChanges:           rsvpChanges,
+				OverrideLocationLabel: override.LocationLabel,
+				OverrideAreas:         override.Areas,
 			})
 		}
 	}
@@ -220,12 +249,39 @@ func (c *RaidCommand) Run(ctx *bot.CommandContext, args []string) []bot.Reply {
 }
 
 func (c *RaidCommand) removeRaids(ctx *bot.CommandContext, parsed *bot.ParsedArgs) []bot.Reply {
+	if reply := rejectFormOnRemove(ctx, parsed); reply != nil {
+		return []bot.Reply{*reply}
+	}
+
+	tr := ctx.Tr()
+
+	// Remove-by-UID targets specific rules directly and doesn't go through
+	// the pokemon/level/everything selection below, so a costume: arg has
+	// nothing to filter — resolve it only for the selection-based path
+	// (avoids rejecting `id:N costume:bad` and silently ignoring
+	// `id:N costume:1`).
 	if len(parsed.RemoveUIDs) > 0 {
-		tr := ctx.Tr()
 		return removeByUIDs(ctx, ctx.Tracking.Raids, parsed.RemoveUIDs,
 			store.RaidGetUID,
 			func(r *db.RaidTrackingAPI) string { return ctx.RowText.RaidRowText(tr, raidAPIToTracking(r)) },
 		)
+	}
+
+	// Costume filter: when present, narrows removal to rules with this
+	// exact costume ID, in addition to whatever pokemon/level/everything
+	// selection matched below. Mirrors untrack.go's costume-removal idiom.
+	var costumeFilter *int
+	if costumeArg, ok := parsed.Strings["costume"]; ok {
+		id, resolved := ctx.ArgMatcher.ResolveCostume(costumeArg, ctx.Language)
+		if !resolved {
+			return []bot.Reply{{
+				React: "🙅",
+				Text: tr.Tf("msg.costume_not_found",
+					ctx.EscapeForCode(costumeArg),
+					bot.CommandPrefix(ctx)),
+			}}
+		}
+		costumeFilter = &id
 	}
 
 	tracked, err := ctx.Tracking.Raids.SelectByIDProfile(ctx.TargetID, ctx.ProfileNo)
@@ -261,10 +317,14 @@ func (c *RaidCommand) removeRaids(ctx *bot.CommandContext, parsed *bot.ParsedArg
 		if parsed.HasKeyword("arg.everything") {
 			shouldRemove = true
 		}
-		if shouldRemove {
-			uidsToDelete = append(uidsToDelete, existing.UID)
-			removed = append(removed, existing)
+		if !shouldRemove {
+			continue
 		}
+		if costumeFilter != nil && existing.Costume != *costumeFilter {
+			continue
+		}
+		uidsToDelete = append(uidsToDelete, existing.UID)
+		removed = append(removed, existing)
 	}
 
 	if len(uidsToDelete) == 0 {
@@ -277,7 +337,6 @@ func (c *RaidCommand) removeRaids(ctx *bot.CommandContext, parsed *bot.ParsedArg
 	}
 
 	ctx.TriggerReload()
-	tr := ctx.Tr()
 	var descriptions []string
 	for i := range removed {
 		descriptions = append(descriptions, ctx.RowText.RaidRowText(tr, raidAPIToTracking(&removed[i])))

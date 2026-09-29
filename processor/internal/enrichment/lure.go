@@ -45,14 +45,14 @@ func (e *Enricher) Lure(lure *webhook.LureWebhook, tileMode int) (map[string]any
 	e.addMapURLs(m, lure.Latitude, lure.Longitude, "pokestops", lure.PokestopID)
 
 	// Reverse geocoding
-	e.addGeoResult(m, lure.Latitude, lure.Longitude)
+	e.addLocationFields(m, lure.Latitude, lure.Longitude)
 
 	// Static map tile — only pass non-zero lureTypeId so tileserver template nil checks work
 	var tileFields map[string]any
 	if lure.LureID != 0 {
 		tileFields = map[string]any{"lureTypeId": lure.LureID}
 	}
-	pending := e.addStaticMap(m, "pokestop", lure.Latitude, lure.Longitude, tileFields, tileMode)
+	pending := e.addStaticMap(m, "pokestop", lure.Latitude, lure.Longitude, tileFields, tileMode, lure.PokestopID)
 
 	// Lure data from util.json (colour + emoji key); English display name
 	// comes from pogo-translations key lure_{id} via the English translator.

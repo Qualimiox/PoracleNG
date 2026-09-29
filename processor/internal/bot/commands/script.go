@@ -271,9 +271,10 @@ func (c *ScriptCommand) invasionToScript(prefix string, inv *db.InvasionTracking
 	} else {
 		parts = append(parts, "everything")
 	}
-	if inv.Gender == 1 {
+	switch inv.Gender {
+	case 1:
 		parts = append(parts, "male")
-	} else if inv.Gender == 2 {
+	case 2:
 		parts = append(parts, "female")
 	}
 	if inv.Distance > 0 {
@@ -345,6 +346,12 @@ func (c *ScriptCommand) questToScript(ctx *bot.CommandContext, prefix string, q 
 			parts = append(parts, fmt.Sprintf("stardust:%d", q.Reward))
 		} else {
 			parts = append(parts, "stardust")
+		}
+	case 8: // pokecoins — minimum amount stored in Reward field
+		if q.Reward > 0 {
+			parts = append(parts, fmt.Sprintf("pokecoins:%d", q.Reward))
+		} else {
+			parts = append(parts, "pokecoins")
 		}
 	case 4: // candy
 		if q.Reward > 0 {
