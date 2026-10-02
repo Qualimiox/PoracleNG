@@ -242,7 +242,7 @@ var configSchema = []ConfigSection{
 				{Value: "webhook", Label: "Webhook", Description: "PVP data comes from Golbat webhooks (only supported source)"},
 				{Value: "ohbem", Label: "Ohbem", Description: "Not currently supported in PoracleNG", Deprecated: true},
 			}},
-			{Name: "level_caps", Type: "int[]", Default: []int{50}, Description: "Level caps to include in PVP rank calculations (e.g., [50] or [50, 51])"},
+			{Name: "level_caps", Type: "int[]", Default: []int{50}, Description: "Level caps to include in PVP rank calculations (e.g., [50] or [50, 51]). Should match Golbat's PVP level caps — ranks for caps not listed here are ignored"},
 			{Name: "include_mega_evolution", Type: "bool", Default: false, Description: "Include mega evolutions in PVP rank calculations"},
 			{Name: "evolution_direct_tracking", Type: "bool", Default: false, Description: "Allow users to track PVP evolutions directly (e.g., tracking Vaporeon matches an Eevee)"},
 			{Name: "filter_by_track", Type: "bool", Default: false, Description: "Auto-filter PVP display listings by the user's tracking requirements"},
