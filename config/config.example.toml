@@ -43,7 +43,11 @@ cache_dir = ".cache/geofences"           # shared cache directory for downloaded
 #   (eg vaporeon would match an eevee)
 
 [pvp]
-level_caps = [50]                        # level caps to include in rank calculations, eg [50, 51]
+# level_caps - level caps to include in rank calculations, eg [50, 51].
+#   Should match the level caps configured in Golbat's PVP settings. Ranks Golbat
+#   sends for a cap not listed here are ignored, so with [50] a rank-5 cap-51
+#   (best buddy) result will not match any PVP tracking.
+level_caps = [50]
 # include_mega_evolution - server default for PVP rules that do NOT specify a
 # mega keyword (i.e. pvp_ranking_evolution = 0). false: those rules match base
 # forms only; true: they also match mega/temporary-evolution ranks. Per-rule
