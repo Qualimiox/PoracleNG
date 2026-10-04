@@ -62,6 +62,8 @@ type v2PokemonRule struct {
 	PVPRankingCap       *int `json:"pvp_ranking_cap,omitempty" nullable:"true" doc:"PVP level cap. Omit to use the league default cap (stored as 0 = league default). Returned as null when at its wildcard."`
 	PVPRankingEvolution *int `json:"pvp_ranking_evolution,omitempty" nullable:"true" doc:"Temp-evolution (mega) PVP discriminator selecting which evolution's PVP rank this rule alerts on: 0 = base form, 1 = Mega, 2 = Mega X, 3 = Mega Y. Omit for base form (stored as 0). Returned as null when at its wildcard (0)."`
 
+	ConfirmedTime *bool `json:"confirmed_time,omitempty" nullable:"true" doc:"Match confirmed disappear time only. Omit to match regardless (default false). Returned as null when false."`
+
 	// Common fields.
 	Distance *int    `json:"distance,omitempty" nullable:"true" doc:"Radius in metres around the anchor location. Omit (or 0) to match by the profile's geofence areas instead of a radius — 0 means area-based, NOT zero metres (stored as 0). Returned as null when at its wildcard."`
 	Template *string `json:"template,omitempty" nullable:"true" doc:"DTS template name. Omit (or empty) to use the server's configured default template (stored as \"\"). Returned as null when at its wildcard."`
@@ -150,6 +152,7 @@ func translateV2Pokemon(deps *TrackingDeps, humanID string, profileNo int, oc ov
 		PVPRankingMinCP:       valueOr(req.PVPRankingMinCP, 0),
 		PVPRankingCap:         valueOr(req.PVPRankingCap, 0),
 		PVPRankingEvolution:   valueOr(req.PVPRankingEvolution, 0),
+		ConfirmedTime:         db.IntBool(valueOr(req.ConfirmedTime, false)),
 		Clean:                 packClean(valueOr(req.Clean, false), valueOr(req.Edit, false), valueOr(req.Summary, false)),
 		OverrideLocationLabel: overrideLabel,
 		OverrideAreas:         normalizeOverrideAreas(req.OverrideAreas),
@@ -195,6 +198,7 @@ func pokemonRowToRule(row *db.MonsterTrackingAPI) v2PokemonRule {
 		PVPRankingMinCP:       ptrUnless(row.PVPRankingMinCP, 0),
 		PVPRankingCap:         ptrUnless(row.PVPRankingCap, 0),
 		PVPRankingEvolution:   ptrUnless(row.PVPRankingEvolution, 0),
+		ConfirmedTime:         ptrUnless(bool(row.ConfirmedTime), false),
 		Distance:              ptrUnless(row.Distance, 0),
 		Template:              ptrUnless(row.Template, ""),
 		Clean:                 ptrUnless(db.IsClean(row.Clean), false),

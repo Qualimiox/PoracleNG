@@ -5274,6 +5274,13 @@
                     "null"
                   ]
                 },
+                "confirmed_time": {
+                  "description": "Match confirmed disappear time only. Omit to match regardless (default false). Returned as null when false.",
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                },
                 "costume": {
                   "description": "Costume id. Omit/null = any (stored 9000). 0 = no costume. N = that costume.",
                   "format": "int64",
@@ -5592,6 +5599,13 @@
                     "null"
                   ]
                 },
+                "confirmed_time": {
+                  "description": "Match confirmed disappear time only. Omit to match regardless (default false). Returned as null when false.",
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                },
                 "costume": {
                   "description": "Costume id. Omit/null = any (stored 9000). 0 = no costume. N = that costume.",
                   "format": "int64",
@@ -5905,6 +5919,13 @@
                 },
                 "clean": {
                   "description": "Auto-delete the alert on expiry (clean bitmask bit 1). Omit to disable (default false). Returned as null when false.",
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                },
+                "confirmed_time": {
+                  "description": "Match confirmed disappear time only. Omit to match regardless (default false). Returned as null when false.",
                   "type": [
                     "boolean",
                     "null"
@@ -8014,6 +8035,13 @@
                     "null"
                   ]
                 },
+                "confirmed_time": {
+                  "description": "Match confirmed disappear time only. Omit to match regardless (default false). Returned as null when false.",
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                },
                 "costume": {
                   "description": "Costume id. Omit/null = any (stored 9000). 0 = no costume. N = that costume.",
                   "format": "int64",
@@ -10003,6 +10031,13 @@
                     "null"
                   ]
                 },
+                "confirmed_time": {
+                  "description": "Match confirmed disappear time only. Omit to match regardless (default false). Returned as null when false.",
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                },
                 "costume": {
                   "description": "Costume id. Omit/null = any (stored 9000). 0 = no costume. N = that costume.",
                   "format": "int64",
@@ -11011,6 +11046,13 @@
           },
           "clean": {
             "description": "Auto-delete the alert on expiry (clean bitmask bit 1). Omit to disable (default false). Returned as null when false.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "confirmed_time": {
+            "description": "Match confirmed disappear time only. Omit to match regardless (default false). Returned as null when false.",
             "type": [
               "boolean",
               "null"

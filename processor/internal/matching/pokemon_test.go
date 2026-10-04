@@ -102,6 +102,50 @@ func makeMonster(id string, pokemonID int) *db.MonsterTracking {
 	}
 }
 
+func TestPokemonMatchConfirmedTimeFilter(t *testing.T) {
+	human := makeHuman("user1")
+	monster := makeMonster("user1", 25)
+	monster.ConfirmedTime = db.IntBool(true)
+
+	st := makeTestState([]*db.MonsterTracking{monster}, map[string]*db.Human{"user1": human})
+	matcher := &PokemonMatcher{PVPQueryMaxRank: 100}
+
+	// Disappear time NOT verified - should not match
+	pokemon := &ProcessedPokemon{
+		PokemonID:             25,
+		Form:                  0,
+		IV:                    100,
+		CP:                    1000,
+		Level:                 20,
+		ATK:                   15,
+		DEF:                   15,
+		STA:                   15,
+		Gender:                1,
+		Weight:                6.0,
+		Size:                  1,
+		RarityGroup:           1,
+		TTHSeconds:            600,
+		Latitude:              51.5,
+		Longitude:             0.0,
+		Encountered:           true,
+		DisappearTimeVerified: false,
+		PVPBestRank:           make(map[int][]pvp.LeagueRank),
+		PVPEvoData:            make(map[int]map[int][]pvp.LeagueRank),
+	}
+
+	matched, _ := matcher.Match(pokemon, st)
+	if len(matched) != 0 {
+		t.Errorf("Expected 0 matches for unconfirmed disappear time, got %d", len(matched))
+	}
+
+	// Disappear time verified - should match
+	pokemon.DisappearTimeVerified = true
+	matched, _ = matcher.Match(pokemon, st)
+	if len(matched) != 1 {
+		t.Errorf("Expected 1 match for verified disappear time, got %d", len(matched))
+	}
+}
+
 func TestPokemonMatchBasic(t *testing.T) {
 	human := makeHuman("user1")
 	monster := makeMonster("user1", 25) // Pikachu

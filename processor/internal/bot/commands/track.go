@@ -212,6 +212,7 @@ func (c *TrackCommand) Run(ctx *bot.CommandContext, args []string) []bot.Reply {
 				PVPRankingMinCP:       pe.MinCP,
 				PVPRankingCap:         pe.Cap,
 				PVPRankingEvolution:   pe.Evolution,
+				ConfirmedTime:         db.IntBool(filters.confirmedTime),
 				OverrideLocationLabel: override.LocationLabel,
 				OverrideAreas:         override.Areas,
 			})
@@ -317,6 +318,7 @@ func trackParams(ctx *bot.CommandContext) []bot.ParamDef {
 		{Type: bot.ParamPrefixStringList, Key: "arg.prefix.area"},
 		{Type: bot.ParamKeyword, Key: "arg.remove"},
 		{Type: bot.ParamKeyword, Key: "arg.clean"},
+		{Type: bot.ParamKeyword, Key: "arg.confirmed_time"},
 		{Type: bot.ParamKeyword, Key: "arg.shiny"},
 		{Type: bot.ParamGender},
 		{Type: bot.ParamTypeName},
@@ -346,27 +348,28 @@ func trackParams(ctx *bot.CommandContext) []bot.ParamDef {
 }
 
 type trackFilters struct {
-	distance  int
-	minIV     int
-	maxIV     int
-	minCP     int
-	maxCP     int
-	minLevel  int
-	maxLevel  int
-	atk       int
-	def       int
-	sta       int
-	maxAtk    int
-	maxDef    int
-	maxSta    int
-	gender    int
-	minTime   int
-	rarity    int
-	maxRarity int
-	size      int
-	maxSize   int
-	template  string
-	clean     int
+	distance      int
+	minIV         int
+	maxIV         int
+	minCP         int
+	maxCP         int
+	minLevel      int
+	maxLevel      int
+	atk           int
+	def           int
+	sta           int
+	maxAtk        int
+	maxDef        int
+	maxSta        int
+	gender        int
+	minTime       int
+	rarity        int
+	maxRarity     int
+	size          int
+	maxSize       int
+	template      string
+	clean         int
+	confirmedTime bool
 }
 
 func (c *TrackCommand) parseFilters(ctx *bot.CommandContext, parsed *bot.ParsedArgs) trackFilters {
@@ -407,6 +410,11 @@ func (c *TrackCommand) parseFilters(ctx *bot.CommandContext, parsed *bot.ParsedA
 	}
 	if parsed.HasKeyword("arg.edit") {
 		f.clean |= 2
+	}
+
+	// Confirmed Time
+	if parsed.HasKeyword("arg.confirmed_time") {
+		f.confirmedTime = true
 	}
 
 	// Gender

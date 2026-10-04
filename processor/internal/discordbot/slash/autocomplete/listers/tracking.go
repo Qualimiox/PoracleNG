@@ -250,6 +250,7 @@ func toMonsterTracking(api *db.MonsterTrackingAPI) *db.MonsterTracking {
 		PVPRankingWorst:  api.PVPRankingWorst,
 		PVPRankingMinCP:  api.PVPRankingMinCP,
 		PVPRankingCap:    api.PVPRankingCap,
+		ConfirmedTime:    api.ConfirmedTime,
 	}
 }
 

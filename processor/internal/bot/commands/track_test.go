@@ -334,6 +334,19 @@ func TestTrack_NoTemplate_NoDTS(t *testing.T) {
 
 // --- Basic tracking ---
 
+func TestTrack_WithConfirmedTime(t *testing.T) {
+	ctx := trackCtx(t)
+	replies := runTrack(t, ctx, "25 confirmedtime")
+
+	require.NotEmpty(t, replies)
+	assert.Equal(t, "✅", replies[0].React, "reply: %s", replies[0].Text)
+
+	rows, _ := ctx.Tracking.Monsters.SelectByIDProfile("user1", 1)
+	require.Len(t, rows, 1)
+	assert.True(t, bool(rows[0].ConfirmedTime), "confirmed_time should be true")
+	assert.Contains(t, replies[0].Text, "confirmed time")
+}
+
 func TestTrack_BasicPokemon(t *testing.T) {
 	ctx := trackCtx(t)
 	replies := runTrack(t, ctx, "25")

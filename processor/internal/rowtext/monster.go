@@ -132,6 +132,10 @@ func (g *Generator) MonsterRowText(tr *i18n.Translator, monster *db.MonsterTrack
 		s += " | " + tr.Tf("tracking.min_time_fmt", monster.MinTime)
 	}
 
+	if bool(monster.ConfirmedTime) {
+		s += " | " + tr.T("tracking.confirmed_time")
+	}
+
 	s += " " + standardText(tr, monster.Template, g.DefaultTemplateName, monster.Clean)
 	s = appendOverride(tr, s, monster.OverrideLocationLabel, monster.OverrideAreas)
 
