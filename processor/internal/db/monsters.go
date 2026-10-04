@@ -44,6 +44,7 @@ type MonsterTracking struct {
 	PVPRankingMinCP       int      `db:"pvp_ranking_min_cp"`
 	PVPRankingCap         int      `db:"pvp_ranking_cap"`
 	PVPRankingEvolution   int      `db:"pvp_ranking_evolution"`
+	ConfirmedTime         IntBool  `db:"confirmed_time"`
 	OverrideLocationLabel string   `db:"override_location_label"`
 	OverrideAreasRaw      string   `db:"override_areas"`
 	OverrideAreas         []string `db:"-"`
@@ -98,6 +99,7 @@ func LoadMonsters(db *sqlx.DB) (*MonsterIndex, error) {
 		        COALESCE(template, '') AS template, clean, ping,
 		        pvp_ranking_league, pvp_ranking_best, pvp_ranking_worst,
 		        pvp_ranking_min_cp, pvp_ranking_cap, pvp_ranking_evolution,
+		        confirmed_time,
 		        COALESCE(override_location_label, '') AS override_location_label,
 		        COALESCE(override_areas, '') AS override_areas
 		 FROM monsters`)

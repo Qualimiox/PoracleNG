@@ -21,25 +21,26 @@ const (
 
 // ProcessedPokemon holds computed fields for matching.
 type ProcessedPokemon struct {
-	PokemonID   int
-	Form        int
-	Costume     int
-	IV          float64 // -1 if not encountered
-	CP          int
-	Level       int
-	ATK         int
-	DEF         int
-	STA         int
-	Gender      int
-	Weight      float64
-	Size        int
-	RarityGroup int
-	TTHSeconds  float64
-	Latitude    float64
-	Longitude   float64
-	Encountered bool
-	PVPBestRank map[int][]pvp.LeagueRank
-	PVPEvoData  map[int]map[int][]pvp.LeagueRank
+	PokemonID             int
+	Form                  int
+	Costume               int
+	IV                    float64 // -1 if not encountered
+	CP                    int
+	Level                 int
+	ATK                   int
+	DEF                   int
+	STA                   int
+	Gender                int
+	Weight                float64
+	Size                  int
+	RarityGroup           int
+	TTHSeconds            float64
+	Latitude              float64
+	Longitude             float64
+	Encountered           bool
+	DisappearTimeVerified bool
+	PVPBestRank           map[int][]pvp.LeagueRank
+	PVPEvoData            map[int]map[int][]pvp.LeagueRank
 }
 
 // ProcessPokemonWebhook converts a raw webhook into ProcessedPokemon with computed fields.
@@ -71,25 +72,26 @@ func ProcessPokemonWebhook(pokemon *webhook.PokemonWebhook, rarityGroup int, pvp
 	pvpResult := pvp.Calculate(pokemon, pvpCfg)
 
 	return &ProcessedPokemon{
-		PokemonID:   pokemon.PokemonID,
-		Form:        form,
-		Costume:     pokemon.Costume,
-		IV:          iv,
-		CP:          cp,
-		Level:       level,
-		ATK:         atk,
-		DEF:         def,
-		STA:         sta,
-		Gender:      gender,
-		Weight:      weight,
-		Size:        size,
-		RarityGroup: rarityGroup,
-		TTHSeconds:  tthSeconds,
-		Latitude:    pokemon.Latitude,
-		Longitude:   pokemon.Longitude,
-		Encountered: encountered,
-		PVPBestRank: pvpResult.BestRank,
-		PVPEvoData:  pvpResult.EvolutionData,
+		PokemonID:             pokemon.PokemonID,
+		Form:                  form,
+		Costume:               pokemon.Costume,
+		IV:                    iv,
+		CP:                    cp,
+		Level:                 level,
+		ATK:                   atk,
+		DEF:                   def,
+		STA:                   sta,
+		Gender:                gender,
+		Weight:                weight,
+		Size:                  size,
+		RarityGroup:           rarityGroup,
+		TTHSeconds:            tthSeconds,
+		Latitude:              pokemon.Latitude,
+		Longitude:             pokemon.Longitude,
+		Encountered:           encountered,
+		DisappearTimeVerified: pokemon.DisappearTimeVerified,
+		PVPBestRank:           pvpResult.BestRank,
+		PVPEvoData:            pvpResult.EvolutionData,
 	}
 }
 
@@ -240,6 +242,11 @@ func (m *PokemonMatcher) matchMonsters(
 		}
 		// Min time
 		if data.TTHSeconds < float64(monster.MinTime) {
+			continue
+		}
+
+		// Confirmed time filter (checks disappear_time_verified directly)
+		if bool(monster.ConfirmedTime) && !data.DisappearTimeVerified {
 			continue
 		}
 

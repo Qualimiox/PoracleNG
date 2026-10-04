@@ -48,6 +48,7 @@
 
   "tracking.template_fmt": "template: {0}",
   "tracking.clean": "clean",
+  "tracking.confirmed_time": "confirmed time",
   "tracking.edit": "edit",
   "tracking.summary": "summary",
   "tracking.distance_fmt": "distance: {0}m",
@@ -250,6 +251,7 @@
   "arg.all_items": "all items",
   "arg.any": "any",
   "arg.clean": "clean",
+  "arg.confirmed_time": "confirmedtime",
   "arg.edit": "edit",
   "arg.individually": "individually",
   "arg.list": "list",
