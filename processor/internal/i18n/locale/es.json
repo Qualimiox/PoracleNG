@@ -40,6 +40,7 @@
 
   "tracking.template_fmt": "plantilla: {0}",
   "tracking.clean": "limpiar",
+  "tracking.confirmed_time": "tiempo confirmado",
   "tracking.edit": "editar",
   "tracking.distance_fmt": "distancia: {0}m",
   "tracking.iv_fmt": "iv: {0}%-{1}%",
@@ -164,6 +165,7 @@
   "arg.everything": "todo",
   "arg.any": "cualquiera",
   "arg.clean": "limpiar",
+  "arg.confirmed_time": "tiempoconfirmado",
   "arg.edit": "editar",
   "arg.individually": "individualmente",
   "arg.list": "lista",
